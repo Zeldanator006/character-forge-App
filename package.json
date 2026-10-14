@@ -1,0 +1,11 @@
+{
+  "name": "character-forge-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Character Forge: an offline character builder for 5th edition (2014 rules).",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "start": "python3 -m http.server 8080 --directory www"
+  }
+}
