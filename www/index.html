@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Character Forge</title>
+  <meta name="description" content="Build 5th edition characters offline: species, class, skills, spells and a finished sheet.">
+  <meta name="theme-color" content="#2347a0">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Char Forge">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">Character Forge <small>5e, 2014 rules</small></div>
+    <nav aria-label="Main">
+      <button data-act="go" data-view="characters">Characters</button>
+      <button data-act="go" data-view="library">Library</button>
+      <button data-act="go" data-view="settings">Settings</button>
+    </nav>
+  </header>
+  <main id="main"><p class="loading">Loading…</p></main>
+  <noscript><p style="padding:20px">Character Forge needs JavaScript turned on.</p></noscript>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

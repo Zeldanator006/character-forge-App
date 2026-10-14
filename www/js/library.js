@@ -140,6 +140,18 @@ const nocase = (a, b) => {
   const x = a.name.toLowerCase(), y = b.name.toLowerCase();
   return x < y ? -1 : x > y ? 1 : 0;
 };
+/** Searches list entries whose name matches first, then the ones that only mention it. */
+const byRelevance = (q) => {
+  const qs = words(q);
+  const phrase = qs.join(' ');
+  const rank = (e) => {
+    const n = words(e.name), name = n.join(' ');
+    if (name === phrase) return 0;
+    if (name.startsWith(phrase)) return 1;
+    return qs.every((w, i) => n.some((x) => (i === qs.length - 1 ? x.startsWith(w) : x === w))) ? 2 : 3;
+  };
+  return (a, b) => (rank(a) - rank(b)) || nocase(a, b);
+};
 const summary = ({ _words, data, ...e }) => e;
 export const THIRD_CASTER_LISTS = { fighter: 'wizard', rogue: 'wizard' };  // Eldritch Knight, Arcane Trickster
 
@@ -168,7 +180,7 @@ export class Library {
       .filter((e) => (!kind || e.kind === kind) && (!parent || e.parent === parent))
       .filter((e) => !(e.tags || []).some((t) => hidden.includes(t)))
       .filter((e) => !query || matches(e, query))
-      .sort(nocase).slice(0, limit).map(summary);
+      .sort(query ? byRelevance(query) : nocase).slice(0, limit).map(summary);
   }
 
   /** Case-insensitive lookup by name; prefers built-in entries, then the oldest of yours. */

@@ -109,3 +109,10 @@ function fnv(s) {
   for (const ch of new TextEncoder().encode(s)) h = Math.imul(h ^ ch, 16777619) >>> 0;
   return h;
 }
+
+test('search lists name matches before entries that only mention the words', async () => {
+  const { request } = await fresh();
+  const names = (await request('/api/entries?q=fireball')).entries.map((e) => e.name);
+  assert.equal(names[0], 'Fireball');
+  assert.ok(names.length > 1);
+});
