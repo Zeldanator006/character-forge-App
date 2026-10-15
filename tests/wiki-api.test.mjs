@@ -118,3 +118,36 @@ test('a page the wiki doesn’t have is a clear error, not a crash', { timeout: 
   const human = (await request('/api/entries?kind=race')).entries.find((e) => e.name === 'Human' && e.source === 'wiki');
   await assert.rejects(request(`/api/entries/${human.id}`), /no page at \/lineage:human/);
 });
+
+test('download everything reads every page once, carries on after a stop, and reports what it couldn’t read', { timeout: 120000 }, async () => {
+  const wiki = fakeWiki();
+  const { request } = await start({ wikiTransport: wiki.transport });
+  const wait = async () => {
+    for (;;) {
+      const { status } = await request('/api/wiki/download-all');
+      if (!status.running) return status;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  };
+  // stop straight away, then start again: the second run finishes the job
+  assert.equal((await request('/api/wiki/download-all', { method: 'POST' })).started, true);
+  assert.equal((await request('/api/wiki/download-all', { method: 'POST' })).started, false);   // already running
+  await request('/api/wiki/download-all/stop', { method: 'POST' });
+  assert.equal((await wait()).stage, 'Stopped');
+  await request('/api/wiki/download-all', { method: 'POST' });
+  const st = await wait();
+  assert.equal(st.stage, 'Done');
+  assert.ok(st.done >= 5, JSON.stringify(st));
+  assert.ok(st.error_count > 0);                       // the sample wiki lacks most pages
+  assert.ok(st.errors.some((e) => /no page at/.test(e)));
+  // everything the sample wiki has was read, so opening it doesn't download again
+  const wizard = (await request('/api/entries?kind=class')).entries.find((e) => e.name === 'Wizard' && e.source === 'wiki');
+  const before = wiki.fetched.length;
+  const detail = (await request(`/api/entries/${wizard.id}`)).entry;
+  assert.equal(detail.parsed, true);
+  assert.equal(wiki.fetched.length, before);
+  assert.ok((await request('/api/classes/wizard/spells')).spells.some((s) => s.name === 'Magic Missile'));
+  // each page was fetched at most once per run (refreshed lists aside)
+  const pages = wiki.fetched.filter((p) => !['/', '/lineage', '/spells', '/wondrous-items'].includes(p));
+  assert.equal(new Set(pages).size, pages.length);
+});

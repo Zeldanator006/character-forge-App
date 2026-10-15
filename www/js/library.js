@@ -354,6 +354,59 @@ export class Library {
     }
   }
 
+  /* ---------------------------------------------------------- download everything (the PC's "download all") */
+  downloadStatus() {
+    const j = this.job || { running: false, done: 0, total: 0, current: '', errors: [], finished: null, stage: '' };
+    return { ...j, errors: j.errors.slice(-5), error_count: j.errors.length };
+  }
+
+  /** Fetch and read every wiki page into the library in the background, so all of it works offline. Pages already
+      read are skipped, so after an interruption it carries on where it stopped. Returns false if already running. */
+  startDownloadAll(includeTags = []) {
+    if (!this.wikiAvailable()) throw new WikiError('Reading the wiki needs the Character Forge app installed on your phone.');
+    if (this.job && this.job.running) return false;
+    this.job = { running: true, done: 0, total: 0, current: '', errors: [], finished: null, stage: 'Reading the wiki’s lists', stop: false };
+    this.downloadAll(includeTags).catch((e) => { this.job.errors.push(e.message); });
+    return true;
+  }
+
+  stopDownloadAll() { if (this.job) this.job.stop = true; }
+
+  async downloadAll(includeTags) {
+    const job = this.job;
+    const hidden = HIDDEN_TAGS.filter((t) => !includeTags.includes(t));
+    const todo = (kinds) => this.all.filter((e) => e.source === 'wiki' && kinds.includes(e.kind)
+      && !(e.parsed && (e.data || {})._v === wikiparse.PARSER_VERSION) && !(e.tags || []).some((t) => hidden.includes(t)));
+    const step = async (label, fn) => {
+      job.current = label;
+      try { await fn(); } catch (e) { job.errors.push(`${label}: ${e.message}`); }
+    };
+    const run = async (entries) => {
+      for (const e of entries) {
+        if (job.stop) return;
+        job.current = e.name;
+        try { await this.ensureDetail(e.id); } catch (err) { job.errors.push(`${e.name}: ${err.message}`); }
+        job.done += 1;
+      }
+    };
+    try {
+      await step('Wiki index', () => this.syncIndex());
+      await step('All spells', () => this.ensureAllSpells());
+      await step('Magic items', () => this.syncMagicItems());
+      // classes and spell lists first: reading them adds the subclasses and spells
+      job.stage = 'Classes and spell lists';
+      const first = todo(['class', 'spell-list']);
+      job.total = first.length;
+      await run(first);
+      job.stage = 'Everything else';
+      const rest = todo(['race', 'subrace', 'background', 'feat', 'subclass', 'spell', 'class-option', 'item']);
+      job.total += rest.length;
+      await run(rest);
+    } finally {
+      Object.assign(job, { running: false, current: '', finished: Date.now() / 1000, stage: job.stop ? 'Stopped' : 'Done' });
+    }
+  }
+
   /** Load the wiki's full spell list once, so any spell can be searched and added. */
   async ensureAllSpells() {
     if (this.allSpellsDone || !this.wikiAvailable()) return;

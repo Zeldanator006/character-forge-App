@@ -174,8 +174,9 @@ export async function createApi(store, srdDoc, { extractPdf, creaturesDoc, wikiT
     })],
 
     ['POST', '/api/wiki/sync', async () => { needWiki(); return lib.syncIndex(); }],
-    // the PC's "download every page, then export for the phone" panel; the phone is where the library goes, so idle
-    ['GET', '/api/wiki/download-all', async () => ({ status: { running: false, done: 0, total: 0, current: '', errors: [], error_count: 0, finished: null } })],
+    ['GET', '/api/wiki/download-all', async () => ({ status: lib.downloadStatus() })],
+    ['POST', '/api/wiki/download-all', async (p, q) => { needWiki(); return { started: lib.startDownloadAll(await tags(q)), status: lib.downloadStatus() }; }],
+    ['POST', '/api/wiki/download-all/stop', async () => { lib.stopDownloadAll(); return { status: lib.downloadStatus() }; }],
     ['POST', '/api/wiki/magic-items', async () => { needWiki(); return lib.syncMagicItems(); }],
     ['GET', '/api/entries', async (p, q) => {
       if (q.get('kind') === 'spell') await lib.ensureAllSpells().catch(() => {});   // never block the list on the wiki

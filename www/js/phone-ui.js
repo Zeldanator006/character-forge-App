@@ -82,7 +82,10 @@ renderSettings = async function renderSettings() {   // eslint-disable-line no-f
   ${c.wiki_available ? `<div class="panel" style="margin-bottom:16px"><h2>Wiki</h2>
     <p class="hint">Pages from dnd5e.wikidot.com are downloaded the first time you open them and kept on this device, so later visits are instant and work offline. ${status.library.pages_cached} pages saved so far.</p>
     <div class="row"><button class="btn primary" data-act="sync">${(status.library.kinds.class || {}).wiki ? 'Refresh wiki index' : 'Load wiki index'}</button></div>
-    <label class="field" style="max-width:300px;margin-top:10px"><span>Seconds between page downloads</span><input type="number" id="delay" min="0.5" step="0.5" value="${c.wiki_delay_seconds}" style="width:100px" data-change="phone-delay"></label></div>` : ''}
+    <label class="field" style="max-width:300px;margin-top:10px"><span>Seconds between page downloads</span><input type="number" id="delay" min="0.5" step="0.5" value="${c.wiki_delay_seconds}" style="width:100px" data-change="phone-delay"></label>
+    <h3 style="margin-top:14px">Download everything</h3>
+    <p class="hint">Saves every page of the wiki on this phone, so the whole library works offline. It reads one page a second, so it takes a while (around an hour); keep the app open. If it stops, start it again and it carries on where it left off.</p>
+    <div id="dl-all"></div></div>` : ''}
   <div class="panel" style="margin-bottom:16px"><h2>Your data</h2>
     <p class="hint">Characters and entries you add are saved on this device only. Back them up to keep them safe or to move them to another device.</p>
     ${persisted === false ? '<p class="note">This browser may clear saved data if the device runs low on space. Installing the app (Add to Home screen) or making regular backups keeps your characters safe.</p>' : ''}
@@ -96,6 +99,7 @@ renderSettings = async function renderSettings() {   // eslint-disable-line no-f
       The SRD 5.1 is licensed under the Creative Commons Attribution 4.0 International License available at
       <a href="https://creativecommons.org/licenses/by/4.0/legalcode" target="_blank" rel="noopener">creativecommons.org/licenses/by/4.0/legalcode</a>.</p>
     <p class="hint small">Character Forge is unofficial and not affiliated with or endorsed by Wizards of the Coast.</p></div>`;
+  if (c.wiki_available) renderDownloadAll();
   $('#import-lib').addEventListener('change', async (e) => {
     const f = e.target.files[0];
     if (!f) return;
@@ -134,6 +138,37 @@ renderSettings = async function renderSettings() {   // eslint-disable-line no-f
     e.target.value = '';
   });
 };
+
+/** The "Download everything" progress in Settings; refreshes itself while the download runs. */
+let dlTimer, dlWasRunning = false;
+async function renderDownloadAll() {
+  const box = $('#dl-all');
+  if (!box) return;
+  const { status: j } = await api('/api/wiki/download-all');
+  if (dlWasRunning && !j.running) { dlWasRunning = false; renderSettings(); return; }   // update the page counts too
+  dlWasRunning = j.running;
+  const pct = j.total ? Math.round((100 * j.done) / j.total) : 0;
+  box.innerHTML = j.running
+    ? `<p><b>${esc(j.stage)}… ${j.total ? `${j.done} of ${j.total}` : ''}</b> ${j.current ? `<span class="muted">(${esc(j.current)})</span>` : ''}</p>
+      <div style="height:8px;background:var(--grid);border-radius:4px;overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--pen)"></div></div>
+      <div class="row" style="margin-top:8px"><button class="btn quiet" data-act="dl-stop">Stop</button></div>`
+    : `${j.finished ? `<p class="note ${j.stage === 'Done' ? 'good' : ''}">${j.stage === 'Done' ? 'Finished' : 'Stopped'}: ${j.done} pages read${j.error_count ? `; ${j.error_count} couldn’t be read` : ''}.</p>` : ''}
+      <div class="row"><button class="btn primary" data-act="dl-start">${j.finished ? 'Download the rest again' : 'Download everything'}</button></div>`;
+  if (j.error_count) box.insertAdjacentHTML('beforeend', `<details><summary class="small" style="cursor:pointer">Problems</summary><p class="small">${j.errors.map(esc).join('<br>')}</p></details>`);
+  clearTimeout(dlTimer);
+  if (!j.running && j.finished) { S.lists = {}; S.details = {}; }   // lists made before the download are out of date
+  if (j.running) dlTimer = setTimeout(() => { if (S.view === 'settings') renderDownloadAll(); }, 2000);
+}
+
+Object.assign(ACTIONS, {
+  'dl-start': async () => {
+    if (!confirm('Download every page of the wiki to this phone? It takes about an hour at one page a second. Keep the app open while it runs.')) return;
+    await api('/api/wiki/download-all', { method: 'POST' });
+    S.lists = {}; S.details = {};
+    renderDownloadAll();
+  },
+  'dl-stop': async () => { await api('/api/wiki/download-all/stop', { method: 'POST' }); renderDownloadAll(); },
+});
 
 Object.assign(CHANGES, {
   'phone-delay': async (t) => {
