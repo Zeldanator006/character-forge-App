@@ -3,10 +3,11 @@
    - with an API key: the app calls Claude directly (official Anthropic SDK, structured outputs)
    - without one: the app builds a prompt to paste into a Claude chat and reads the pasted reply */
 import { Anthropic } from '../vendor/anthropic-sdk.mjs';
-import { ABILITIES, ALIGNMENTS, ARMOR, CLASS_RULES, SKILLS, WEAPONS, ordinal } from './srd.js';
-import { compute } from './rules.js';
+import { ABILITIES, ABILITY_NAMES as ABILITY_FULL, ALIGNMENTS, ARMOR, CLASS_RULES, SKILLS, WEAPONS, ordinal } from './srd.js';
+import { compute, computeAny } from './rules.js';
 import * as gear from './gear.js';
 import { classRules, classSlug, raceSelection } from './library.js';
+import { capitalize, get, isDict, strInt } from './py.js';
 
 export class ClaudeError extends Error {}
 
@@ -58,6 +59,16 @@ const ABILITY_ENUM = { type: 'string', enum: ABILITIES };
 const ASI_OBJ = obj(Object.fromEntries(ABILITIES.map((a) => [a, I])));
 const TRAIT = obj({ name: S, text: S });
 const FEATURE = obj({ name: S, level: I, text: S });
+/** claude_ai._int: int(str(v).strip().lstrip('+')), else the default. */
+const pyIntOf = (v, def = 0) => {
+  if (typeof v === 'number') return Number.isInteger(v) ? v : def;
+  if (typeof v === 'string') return strInt(v.trim().replace(/^\+*/, ''), def);
+  return def;
+};
+const isSkill = (x) => typeof x === 'string' && Object.hasOwn(SKILLS, x);
+/** json.dumps of a flat dict, with Python's ', ' and ': ' separators. */
+const pyDumps = (o) => `{${Object.entries(o || {}).map(([k, v]) => `${JSON.stringify(k)}: ${JSON.stringify(v)}`).join(', ')}}`;
+const BUILT_IN = new Set(['srd', 'wiki']);  // the phone's built-in SRD stands where the PC app's wiki entries do
 
 export const EXTRACT_SCHEMAS = {
   spell: obj({ name: S, page: I, level: I, school: S, casting_time: S, range: S, components: S, duration: S, ritual: B,
@@ -75,7 +86,10 @@ export const EXTRACT_SCHEMAS = {
     armor: arr({ type: 'string', enum: ['light', 'medium', 'heavy', 'shield'] }),
     weapons: arr(S), tools: S, subclass_level: I, asi_levels: arr(I), features: arr(FEATURE),
     cantrips_known: arr(I), spells_known: arr(I) }),
-  item: obj({ name: S, page: I, text: S }),
+  item: obj({ name: S, page: I, text: S,
+    item_type: { type: 'string', enum: ['weapon', 'armor', 'shield', 'wondrous', 'ring', 'potion', 'scroll', 'wand', 'rod', 'staff',
+      'ammunition', 'gear', 'other'] },
+    rarity: S, attunement: B, bonus: I, works_as: S, charges: I }),
   other: obj({ name: S, page: I, text: S }),
 };
 const KIND_HINTS = {
@@ -85,7 +99,9 @@ const KIND_HINTS = {
   feat: 'feats (asi_options empty and asi_amount 0 if the feat gives no ability increase)',
   subclass: "subclasses (parent_class is the base class name, e.g. 'Wizard'; feature level is the class level gained)",
   class: 'base classes (cantrips_known / spells_known: 20 numbers for levels 1-20, or empty if not used)',
-  item: 'magic items or equipment',
+  item: "magic items or equipment (item_type; rarity like 'rare'; attunement true if it requires attunement; "
+    + 'bonus is the +N of a +N weapon or armor, else 0; works_as names the base weapon or armor, like '
+    + "'Longsword' or 'Plate', else empty; charges is the maximum number of charges, else 0)",
   other: 'any other rules content (optional rules, class options, etc.)',
 };
 export const CORE_SCHEMA = obj({
@@ -96,6 +112,8 @@ export const CORE_SCHEMA = obj({
 });
 export const DETAIL_SCHEMA = obj({
   skills: arr({ type: 'string', enum: Object.keys(SKILLS) }),
+  species_skills: arr({ type: 'string', enum: Object.keys(SKILLS) }),
+  background_skills: arr({ type: 'string', enum: Object.keys(SKILLS) }),
   expertise: arr({ type: 'string', enum: Object.keys(SKILLS) }),
   feats: arr(obj({ name: S, asi: { type: 'string', enum: [...ABILITIES, 'none'] }, from: { type: 'string', enum: ['asi', 'race'] } })),
   improvements: ASI_OBJ,
@@ -104,8 +122,44 @@ export const DETAIL_SCHEMA = obj({
   shield: B,
   weapons: arr({ type: 'string', enum: Object.keys(WEAPONS) }),
   equipment: S, tools: S, languages: S,
+  class_options: arr(obj({ list: S, name: S })),
   personality_traits: S, ideals: S, bonds: S, flaws: S, backstory: S, appearance: S, notes: S,
 });
+
+/* ---------------------------------------------------------------- personality and backstory */
+export const STORY_FIELDS = ['name', 'appearance', 'personality_traits', 'ideals', 'bonds', 'flaws', 'backstory'];
+export const STORY_SCHEMA = obj(Object.fromEntries(STORY_FIELDS.map((k) => [k, S])));
+export const STORY_LABELS = {
+  name: 'a name', appearance: 'appearance (2 to 3 sentences)',
+  personality_traits: 'personality traits (two short traits, one sentence each)',
+  ideals: "an ideal (start with a one-word name and a period, like 'Charity. ...')",
+  bonds: 'a bond (one or two sentences)', flaws: 'a flaw (one or two sentences)', backstory: 'a backstory',
+};
+export const STORY_LENGTHS = { short: 'one short paragraph', medium: 'two or three paragraphs', long: 'four to six paragraphs' };
+/** The fields asked for, in the order given (Python keeps repeats too), or all of them. */
+const storyFields = (fields) => {
+  const out = (Array.isArray(fields) && fields.length ? fields : STORY_FIELDS).filter((f) => STORY_FIELDS.includes(f));
+  return out.length ? out : STORY_FIELDS;
+};
+
+/** Keep the fields Claude filled in that were asked for. */
+export function cleanStory(reply, fields) {
+  if (!isDict(reply)) {
+    throw new ClaudeError('That reply isn’t the story the app asked for. Copy the prompt again and paste Claude’s whole reply.');
+  }
+  const out = {};
+  for (const k of fields) {
+    const v = get(reply, k);
+    if (typeof v === 'string' && v.trim()) out[k] = v.trim();
+  }
+  if (!Object.keys(out).length) throw new ClaudeError('The reply didn’t fill in any of the fields that were asked for.');
+  return out;
+}
+
+/** Read a pasted chat reply for the story prompt. */
+export function storyReply(reply, fields) {
+  return cleanStory(parseReply(reply), storyFields(fields));
+}
 
 /* ---------------------------------------------------------------- copy-and-paste mode (no API key) */
 export function chatPrompt(system, user, schema) {
@@ -191,7 +245,7 @@ export function makeClaude({ lib, pdfs, settings }) {
     for (const e of lib.list({ kind: 'subclass', includeTags: tags })) (subclasses[e.parent] = subclasses[e.parent] || []).push(e.name);
     return { races: names('race'), classes: names('class'), backgrounds: names('background'), feats: names('feat'), subclasses };
   };
-  const num = (v, def = 0) => { const n = parseInt(String(v ?? '').trim().replace(/^\+/, ''), 10); return Number.isNaN(n) ? def : n; };
+  const num = pyIntOf;
 
   /* ------------------------------------------------ drafting */
   async function coreRequest(concept, level, tags) {
@@ -270,13 +324,26 @@ export function makeClaude({ lib, pdfs, settings }) {
     return (e && e.data.skills) || [];
   };
 
+  /** Skill choices offered by the species and the background: [race choices, background choices]. */
+  const choices = (char) => {
+    let raceCh = [], bgCh = [];
+    if ((char.race || {}).id) {
+      const sel = raceSelection(lib.get(char.race.id), char.race.variant ?? null, char.race.subrace ?? null);
+      raceCh = sel.analysis.choices || [];
+    }
+    if ((char.background || {}).id) bgCh = (((lib.get(char.background.id) || {}).data || {}).skill_choices) || [];
+    return [raceCh, bgCh];
+  };
+  const choiceText = (chs) => chs.map((c) => `${c.count} of ${c.options && c.options.length ? c.options.join(', ') : 'any skill'}`)
+    .join('; ') || 'none';
+
   async function detailsRequest(concept, char, tags) {
     const opts = optionsForDraft(tags);
     const pdfContext = await pdfs.contextFor(concept);
     let raceNote = '', raceInfo = {};
-    if ((char.race || {}).id && lib.get(char.race.id)) {
-      const sel = raceSelection(lib.get(char.race.id), char.race.variant, char.race.subrace);
-      raceNote = sel.traits.map((t) => `${t.name}: ${(t.text || '').slice(0, 300)}`).join('\n');
+    if ((char.race || {}).id) {
+      const sel = raceSelection(lib.get(char.race.id), char.race.variant ?? null, char.race.subrace ?? null);
+      raceNote = sel.traits.map((t) => `${t.name}: ${[...(t.text || '')].slice(0, 300).join('')}`).join('\n');
       raceInfo = sel.analysis;
     }
     const bgSkills = backgroundSkills(char);
@@ -300,33 +367,80 @@ export function makeClaude({ lib, pdfs, settings }) {
       return `${c.name} ${c.level}: skill choices ${rules.skill_count} from ${(rules.skill_options || []).join(', ')}; `
         + `armor ${(rules.armor || []).join(', ') || 'none'}; weapons ${(rules.weapons || []).join(', ')}`;
     });
-    const system = 'You finish a 5th edition (2014 rules) character for the user’s builder. Use only listed options.';
+    const optionLines = [];
+    // fighting styles, invocations, metamagic and the like
+    let groups;
+    try { groups = lib.classOptionGroups(char, tags); } catch (e) { groups = []; }
+    for (const g of groups) {
+      if (!g.options.length) continue;
+      const names = g.options.map((o) => o.name + (o.prerequisite ? ` (needs ${o.prerequisite})` : '')).join('; ');
+      const count = g.count != null ? `pick ${g.count}` : 'pick what the class allows';
+      optionLines.push(`- ${g.label} (${g.class_name}, ${count}): ${names}`);
+    }
+    const gearLines = [];
+    const first = (char.classes && char.classes.length ? char.classes : [null])[0];
+    if (first && first.id) {
+      const ce = lib.get(first.id);
+      const s = ce && BUILT_IN.has(ce.source) ? classSlug(ce) : '';
+      for (const line of gear.startingEquipment(s, ((ce || {}).data || {}).equipment || [])) gearLines.push('- ' + line.text);
+    }
+    const bgId = (char.background || {}).id;
+    let bgEquipment = '';
+    if (bgId) bgEquipment = (((lib.get(bgId) || {}).data) || {}).equipment || '';
+    const [raceCh, bgCh] = choices(char);
+    const system = "You finish a 5th edition (2014 rules) character for the user's builder. Use only listed options.";
     let user = `Concept: ${concept}\nSo far: ${preview.class_line}, species ${(char.race || {}).name || '?'}, `
-      + `background ${(char.background || {}).name || '?'}.\nBackground already gives skills: ${bgSkills.join(', ') || 'none'} (don't repeat them).\n`
-      + `Species traits:\n${raceNote || 'n/a'}\nSpecies extra skill choices: ${raceInfo.skill_choices || 0}; bonus feat from species: ${raceInfo.bonus_feat ? 'yes' : 'no'}\n`
-      + `Classes:\n${classLines.join('\n')}\n`
-      + `Ability score improvements available from levels: ${preview.asi.available} (each is +2 points in 'improvements' or one feat with from='asi')\n`
-      + `Current scores: ${JSON.stringify(preview.scores)}\nFeats available: ${opts.feats.join(', ')}\n`
-      + (spellLines.length ? `Spell options (name (level)):\n${spellLines.join('\n')}\n` : 'No spellcasting yet.\n')
-      + 'Pick skills (class picks only, plus species picks if any), expertise only if a class feature grants it, feats, improvements, '
-      + 'spells (respect the counts; cantrips are level 0; class field uses the given value), starting armor and weapons the character '
-      + 'is proficient with, and short roleplay details.';
+      + `background ${(char.background || {}).name || '?'}.\nBackground already gives skills: `
+      + `${bgSkills.join(', ') || 'none'} (don't repeat them).\nSpecies traits:\n${raceNote || 'n/a'}\n`
+      + `Species skill choices (put these in species_skills): ${choiceText(raceCh)}\n`
+      + `Background skill choices (put these in background_skills): ${choiceText(bgCh)}\n`
+      + 'Bonus feat from species: '
+      + `${raceInfo.bonus_feat ? 'yes' : 'no'}\nClasses:\n` + classLines.join('\n')
+      + `\nAbility score improvements available from levels: ${preview.asi.available} (each is +2 points in `
+      + `'improvements' or one feat with from='asi')\nCurrent scores: ${pyDumps(preview.scores)}\n`
+      + `Feats available: ${opts.feats.join(', ')}\n`
+      + (spellLines.length ? 'Spell options (name (level)):\n' + spellLines.join('\n') + '\n' : 'No spellcasting yet.\n')
+      + 'Pick skills (class picks only), species_skills and background_skills, expertise only if a class feature '
+      + 'grants it, feats, improvements, spells (respect the counts; cantrips are level 0; class field uses the '
+      + 'given value), starting gear, and short roleplay details.\n'
+      + "Starting gear: pick one option from each line of the class's starting equipment"
+      + (gearLines.length ? ':\n' + gearLines.join('\n') : ' (none listed; choose sensible gear)')
+      + (bgEquipment ? `\nThe background adds: ${bgEquipment}` : '')
+      + (optionLines.length ? "\nClass options to pick (put each pick in class_options with 'list' set to the list's name, and respect "
+        + 'prerequisites and counts):\n' + optionLines.join('\n') : '')
+      + "\nPut the chosen armor in 'armor', 'shield' true if a shield was chosen, every weapon in 'weapons' (repeat "
+      + "a name for two of them; prefer weapons the character is proficient with), and everything else, including "
+      + "the background's items and coins, comma-separated in 'equipment' (like \"explorer's pack, holy symbol, "
+      + '5 sticks of incense, 15 gp").';
     if (pdfContext) user += `\n\nRelevant passages from the user's books:\n${pdfContext.slice(0, 6000)}`;
     return [system, user];
   }
 
   function applyDetails(char, detail, warnings) {
-    if (!detail || typeof detail !== 'object' || Array.isArray(detail)) {
+    if (!isDict(detail)) {
       throw new ClaudeError('That reply isn’t the character details the app asked for. Copy the step 2 prompt again.');
     }
     const bgSkills = backgroundSkills(char);
-    char.skills = (detail.skills || []).filter((x) => x in SKILLS && !bgSkills.includes(x));
-    char.expertise = (detail.expertise || []).filter((x) => x in SKILLS);
+    const [raceCh, bgCh] = choices(char);
+    const pick = (names, chs) => {
+      const limit = chs.reduce((t, c) => t + c.count, 0);
+      const allowed = chs.some((c) => !(c.options && c.options.length)) ? null : new Set(chs.flatMap((c) => c.options));
+      const out = [];
+      for (const n of Array.isArray(names) ? names : []) {
+        if (isSkill(n) && !out.includes(n) && out.length < limit && (allowed === null || allowed.has(n))) out.push(n);
+      }
+      return out;
+    };
+    char.race_skills = pick(detail.species_skills, raceCh);
+    char.bg_skills = pick(detail.background_skills, bgCh);
+    const taken = new Set([...bgSkills, ...char.race_skills, ...char.bg_skills]);
+    char.skills = (detail.skills || []).filter((x) => isSkill(x) && !taken.has(x));
+    char.expertise = (detail.expertise || []).filter(isSkill);
     const imp = detail.improvements || {};
-    char.improvements = Object.fromEntries(ABILITIES.map((a) => [a, num(imp[a])]));
+    char.improvements = Object.fromEntries(ABILITIES.map((a) => [a, num(get(imp, a))]));
     char.feats = [];
     for (const f of detail.feats || []) {
-      if (!f || typeof f !== 'object') continue;
+      if (!isDict(f)) continue;
       const fe = entryByName('feat', f.name);
       if (!fe) { warnings.push(`Feat ‘${f.name}’ wasn’t found.`); continue; }
       const feat = { id: fe.id, name: fe.name, from: ['asi', 'race'].includes(f.from) ? f.from : 'asi' };
@@ -339,31 +453,95 @@ export function makeClaude({ lib, pdfs, settings }) {
     for (let sp of detail.spells || []) {
       if (typeof sp === 'string') sp = { name: sp };
       let s = sp.class ? parentSlug(sp.class) : null;
-      if (!slugs.includes(s)) s = slugs[0] || '';
+      if (!slugs.includes(s)) s = slugs.length ? slugs[0] : '';
       const se = entryByName('spell', sp.name);
       if (!se) { warnings.push(`Spell ‘${sp.name}’ wasn’t found.`); continue; }
       char.spells.push({ id: se.id, name: se.name, level: se.data.level ?? null, class: s, prepared: true });
     }
-    char.armor = detail.armor in ARMOR ? detail.armor : '';
+    char.armor = typeof detail.armor === 'string' && Object.hasOwn(ARMOR, detail.armor) ? detail.armor : '';
     char.shield = Boolean(detail.shield);
-    char.weapons = (detail.weapons || []).filter((w) => w in WEAPONS);
-    // turn the picks into inventory items, then clear the old free-text gear fields (claude_ai.py does the same)
+    char.weapons = (detail.weapons || []).filter((w) => typeof w === 'string' && Object.hasOwn(WEAPONS, w));
+    // turn the picks into inventory items, then clear the old free-text gear fields
     delete char.inventory;
     gear.ensureInventory(char);
     char.inventory = gear.mergeItems([], char.inventory);
     const [items, coins] = gear.itemsFromText(detail.equipment || '');
     const have = new Set(char.inventory.map((i) => i.name));
     gear.mergeItems(char.inventory, items.filter((i) => !(gear.role(i) && have.has(i.name))));
-    char.coins = Object.fromEntries(['cp', 'sp', 'ep', 'gp', 'pp'].map((k) => [k, ((char.coins || {})[k] ?? 0) + (coins[k] ?? 0)]));
+    char.coins = Object.fromEntries(['cp', 'sp', 'ep', 'gp', 'pp'].map((k) => [k, get(char.coins || {}, k, 0) + get(coins, k, 0)]));
     [char.armor, char.shield, char.weapons] = ['', false, []];
     char.equipment = '';
     char.gear_start = { method: 'claude' };
+    const wanted = (detail.class_options || []).filter((o) => isDict(o) && o.name);
+    if (wanted.length) {
+      // match each pick to one of the class's option lists
+      let groups;
+      try { groups = lib.classOptionGroups(char); } catch (e) { groups = []; }
+      char.class_options = [];
+      for (const w of wanted) {
+        const list = String(w.list || '').toLowerCase();
+        const g = groups.find((x) => x.label.toLowerCase() === list) || null;
+        const pool = g ? [g] : groups;
+        const name = String(w.name).trim().toLowerCase();
+        let hit = null;
+        for (const gr of pool) {
+          const o = gr.options.find((x) => x.name.toLowerCase() === name);
+          if (o) { hit = [gr, o]; break; }
+        }
+        if (!hit) { warnings.push(`Class option ‘${w.name}’ wasn’t found.`); continue; }
+        const [gr, o] = hit;
+        char.class_options.push({ key: gr.key, class: gr.class, label: gr.label, name: o.name,
+          text: get(o, 'text', ''), source: get(o, 'source', ''), prerequisite: get(o, 'prerequisite', '') });
+      }
+    }
     if (detail.tools) char.tools = detail.tools;
     char.languages = detail.languages || '';
     char.personality = Object.fromEntries(['personality_traits', 'ideals', 'bonds', 'flaws'].map((k) => [k, detail[k] || '']));
     char.backstory = detail.backstory || '';
     char.appearance = detail.appearance || '';
     return char;
+  }
+
+  /* ------------------------------------------------ personality and backstory */
+  function storyRequest(char, idea, fields, length = 'medium') {
+    fields = storyFields(fields);
+    const ctx = lib.buildContext(char);
+    const sheet = computeAny(char, ctx);
+    const p = char.personality || {};
+    const current = { name: char.name || '', appearance: char.appearance || '', backstory: char.backstory || '',
+      ...Object.fromEntries(['personality_traits', 'ideals', 'bonds', 'flaws'].map((k) => [k, p[k] || ''])) };
+    const scores = sheet.scores || {};
+    const ranked = Object.keys(scores).sort((a, b) => scores[b] - scores[a]);
+    const lines = [`Species: ${sheet.race_name || 'not chosen'}`, `Class: ${sheet.class_line || 'not chosen'}`,
+      `Background: ${sheet.background_name || 'not chosen'}`];
+    const bg = ctx.background || {};
+    if ((bg.feature || {}).name) lines.push(`Background feature: ${bg.feature.name}`);
+    if (char.alignment) lines.push(`Alignment: ${char.alignment}`);
+    if (ranked.length) {
+      lines.push('Strongest abilities: ' + ranked.slice(0, 2).map((a) => `${ABILITY_FULL[a]} ${scores[a]}`).join(', ')
+        + `; weakest: ${ABILITY_FULL[ranked[ranked.length - 1]]} ${scores[ranked[ranked.length - 1]]}`);
+    }
+    const picks = (char.class_options || []).map((o) => o.name).filter(Boolean);
+    if (picks.length) lines.push('Class options: ' + picks.slice(0, 8).join(', '));
+    const feats = (char.feats || []).map((f) => f.name).filter(Boolean);
+    if (feats.length) lines.push('Feats: ' + feats.join(', '));
+    if (sheet.languages) lines.push(`Languages: ${sheet.languages}`);
+    const keep = Object.entries(current).filter(([k, v]) => v && !fields.includes(k)).map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`);
+    const tables = bg.characteristics || {};
+    const tableText = Object.entries(tables).filter(([k]) => fields.includes(k))
+      .map(([k, v]) => `${capitalize(k.replace(/_/g, ' '))} the background suggests: ` + v.slice(0, 8).join(' / ')).join('\n');
+    const system = "You write the personality and backstory of a 5th edition (2014 rules) player character for the player's sheet. "
+      + 'Make it playable: concrete details, a hook or two a DM can use, nothing that takes over the campaign, and '
+      + "nothing that contradicts the character's species, class or background. Plain text only, no markdown; "
+      + 'separate backstory paragraphs with a blank line.';
+    const user = `The player's idea: ${String(idea || '').trim() || '(none given; invent something that fits the character)'}\n\n`
+      + 'The character so far:\n' + lines.join('\n') + '\n\n'
+      + (keep.length ? 'Already written (keep consistent with it):\n' + keep.join('\n') + '\n\n' : '')
+      + (tableText ? tableText + '\nUse or adapt these if they fit the idea, or write your own.\n\n' : '')
+      + 'Write ' + fields.map((f) => (f !== 'backstory' ? STORY_LABELS[f]
+        : `a backstory (${Object.hasOwn(STORY_LENGTHS, length) ? STORY_LENGTHS[length] : STORY_LENGTHS.medium})`)).join('; ')
+      + '. Put an empty string in every other field.';
+    return [system, user, fields];
   }
 
   /* ------------------------------------------------ PDF extraction */
@@ -420,6 +598,15 @@ export function makeClaude({ lib, pdfs, settings }) {
       applyDetails(char, detail, warnings);
       return { character: char, notes: [summary, detail.notes || ''].filter(Boolean).join('\n\n'), warnings };
     },
+    async writeStory(cfg, char, idea, fields, length = 'medium') {
+      const [system, user, asked] = storyRequest(char, idea, fields, length);
+      return cleanStory(await call(cfg, system, user, STORY_SCHEMA, 4000), asked);
+    },
+    storyPrompt(char, idea, fields, length = 'medium') {
+      const [system, user] = storyRequest(char, idea, fields, length);
+      return chatPrompt(system, user, STORY_SCHEMA);
+    },
+    storyReply,
     async extract(cfg, pdfId, start, end, kind) {
       const r = await extractRequest(pdfId, start, end, kind);
       return extractFinish(kind, await call(cfg, r.system, r.user, r.schema, 64000), r.info);
@@ -487,6 +674,9 @@ export function normalizeExtracted(kind, e, pdfInfo) {
       weapons: (e.weapons || []).join(', '), armor: (e.armor || []).join(', '), tools: e.tools || '',
       subclass_level: e.subclass_level || 3, asi_levels: e.asi_levels || [], features: e.features || [], table,
     };
+  } else if (kind === 'item') {
+    out.data = { source: book, text: get(e, 'text', ''), item_type: e.item_type || 'other', rarity: e.rarity || '',
+      attunement: Boolean(e.attunement), bonus: pyIntOf(e.bonus), works_as: e.works_as || '', charges: pyIntOf(e.charges) };
   } else {
     out.data = { source: book, text: e.text || '' };
   }
