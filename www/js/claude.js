@@ -5,6 +5,7 @@
 import { Anthropic } from '../vendor/anthropic-sdk.mjs';
 import { ABILITIES, ALIGNMENTS, ARMOR, CLASS_RULES, SKILLS, WEAPONS, ordinal } from './srd.js';
 import { compute } from './rules.js';
+import * as gear from './gear.js';
 import { classRules, classSlug, raceSelection } from './library.js';
 
 export class ClaudeError extends Error {}
@@ -346,7 +347,17 @@ export function makeClaude({ lib, pdfs, settings }) {
     char.armor = detail.armor in ARMOR ? detail.armor : '';
     char.shield = Boolean(detail.shield);
     char.weapons = (detail.weapons || []).filter((w) => w in WEAPONS);
-    char.equipment = detail.equipment || '';
+    // turn the picks into inventory items, then clear the old free-text gear fields (claude_ai.py does the same)
+    delete char.inventory;
+    gear.ensureInventory(char);
+    char.inventory = gear.mergeItems([], char.inventory);
+    const [items, coins] = gear.itemsFromText(detail.equipment || '');
+    const have = new Set(char.inventory.map((i) => i.name));
+    gear.mergeItems(char.inventory, items.filter((i) => !(gear.role(i) && have.has(i.name))));
+    char.coins = Object.fromEntries(['cp', 'sp', 'ep', 'gp', 'pp'].map((k) => [k, ((char.coins || {})[k] ?? 0) + (coins[k] ?? 0)]));
+    [char.armor, char.shield, char.weapons] = ['', false, []];
+    char.equipment = '';
+    char.gear_start = { method: 'claude' };
     if (detail.tools) char.tools = detail.tools;
     char.languages = detail.languages || '';
     char.personality = Object.fromEntries(['personality_traits', 'ideals', 'bonds', 'flaws'].map((k) => [k, detail[k] || '']));

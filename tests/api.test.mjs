@@ -6,7 +6,8 @@ import { createApi } from '../www/js/api.js';
 import { memoryStore } from '../www/js/store.js';
 
 const srd = JSON.parse(readFileSync(new URL('../www/data/srd-2014.json', import.meta.url), 'utf8'));
-const fresh = () => createApi(memoryStore(), structuredClone(srd));
+const creaturesDoc = JSON.parse(readFileSync(new URL('../www/data/creatures.json', import.meta.url), 'utf8'));
+const fresh = () => createApi(memoryStore(), structuredClone(srd), { creaturesDoc });
 
 test('built-in library lists the SRD', async () => {
   const { request } = await fresh();

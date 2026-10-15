@@ -13,7 +13,9 @@ const fakeBook = {
     'The Stormborn are a hardy folk who walk through thunder. Stormborn have darkvision.'],
 };
 // Like pdf.js, the fake extractor empties the bytes it's given, so a kept copy must not share them
+const creaturesDoc = JSON.parse(readFileSync(new URL('../www/data/creatures.json', import.meta.url), 'utf8'));
 const fresh = () => createApi(memoryStore(), structuredClone(srd), {
+  creaturesDoc,
   extractPdf: async (bytes) => { structuredClone(bytes.buffer, { transfer: [bytes.buffer] }); return structuredClone(fakeBook); },
 });
 const pdfFile = (name = 'grimoire.pdf') => new File([new Uint8Array([37, 80, 68, 70])], name, { type: 'application/pdf' });
@@ -63,7 +65,9 @@ test('drafting through a Claude chat (two pasted replies)', async () => {
   assert.deepEqual(c.skills, ['Medicine', 'Persuasion']);                 // Insight comes from the background
   assert.deepEqual(c.spells.map((s) => s.name), ['Sacred Flame', 'Cure Wounds']);
   assert.deepEqual(r2.warnings, ['Spell ‘Made Up Spell’ wasn’t found.']);
-  assert.deepEqual(c.weapons, ['Warhammer']);
+  assert.deepEqual(c.weapons, []);                                       // the picks became inventory items
+  assert.deepEqual(c.inventory.map((i) => [i.name, i.kind, Boolean(i.equipped)]),
+    [['Chain mail', 'armor', true], ['Shield', 'shield', true], ['Warhammer', 'weapon', true], ['Brewing kit', 'gear', false]]);
   assert.equal(r2.notes, 'A brewer turned healer.\n\nPick Bless next level.');
   const { sheet } = await request('/api/compute', { json: { character: c } });
   assert.equal(sheet.ac, 18);                                              // chain mail 16 + shield

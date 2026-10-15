@@ -1,11 +1,15 @@
 /* Offline support: keeps the app's own files on the device so it opens without a connection.
    Bump VERSION whenever a file below changes, so devices fetch the new copies. */
-const VERSION = 'v7';
+const VERSION = 'v9';
 const CACHE = `character-forge-${VERSION}`;
 const FILES = [
-  './', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest',
-  'js/api.js', 'js/claude.js', 'js/creatures.js', 'js/dice.js', 'js/feats.js', 'js/library.js', 'js/options.js', 'js/pdfs.js',
-  'js/resources.js', 'js/rules.js', 'js/srd.js', 'js/store.js',
+  './', 'index.html', 'phone.css', 'manifest.webmanifest',
+  // the PC app's interface (tools/sync_ui.sh)
+  'ui/app.js', 'ui/companions.js', 'ui/dice.js', 'ui/feats.js', 'ui/gear.js', 'ui/levelup.js', 'ui/offline.js', 'ui/options.js',
+  'ui/phone.js', 'ui/play.js', 'ui/story.js', 'ui/style.css', 'ui/theme.js',
+  'js/api.js', 'js/boot.js', 'js/claude.js', 'js/creatures.js', 'js/dice.js', 'js/feats.js', 'js/gear.js', 'js/levelup.js',
+  'js/library.js', 'js/options.js', 'js/pdfs.js', 'js/phone-ui.js', 'js/py.js', 'js/resources.js', 'js/rules.js', 'js/srd.js',
+  'js/start.js', 'js/store.js',
   'vendor/anthropic-sdk.mjs', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs',
   'data/srd-2014.json', 'data/creatures.json',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png', 'icons/apple-touch-icon.png',

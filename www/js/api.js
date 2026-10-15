@@ -1,8 +1,10 @@
 /* The app's API, answered on the device. The interface calls the same paths the PC app's
    Flask server answered (see the PC repo's app/server.py); here each one is a function. */
-import { compute } from './rules.js';
-import { ABILITIES, ALIGNMENTS, ARMOR, CLASS_RULES, POINT_BUY_COST, SKILLS, STANDARD_ARRAY, WEAPONS } from './srd.js';
-import { Library, raceSelection, classRules } from './library.js';
+import { computeAny, toManual, multiclassReqText, MULTICLASS_REQ } from './rules.js';
+import { ABILITIES, ALIGNMENTS, ARMOR, CLASS_RULES, MULTICLASS_PROFS, POINT_BUY_COST, SKILLS, STANDARD_ARRAY, WEAPONS } from './srd.js';
+import { Library, raceSelection, classRules, classSlug } from './library.js';
+import * as gear from './gear.js';
+import * as levelup from './levelup.js';
 import { Pdfs } from './pdfs.js';
 import { DEFAULT_MODEL, MODELS, makeClaude } from './claude.js';
 import * as creatures from './creatures.js';
@@ -154,9 +156,14 @@ export async function createApi(store, srdDoc, { extractPdf, creaturesDoc } = {}
     }],
     ['GET', '/api/srd', async () => ({
       skills: SKILLS,
-      armor: Object.fromEntries(Object.entries(ARMOR).map(([k, v]) => [k, { category: v[0], base: v[1] }])),
+      armor: Object.fromEntries(Object.entries(ARMOR).map(([k, v]) => [k, { category: v[0], base: v[1], maxdex: v[2], str: v[3], stealth: v[4] }])),
+      catalog: gear.catalog(), wealth: gear.STARTING_WEALTH, damage_types: gear.DAMAGE_TYPES,
+      weapon_flags: gear.WEAPON_FLAGS, bow_forms: gear.BOW_FORMS,
       weapons: Object.fromEntries(Object.entries(WEAPONS).map(([k, v]) => [k, { category: v[0], ranged: v[1], damage: v[2], type: v[3], properties: v[4] }])),
       alignments: ALIGNMENTS, point_buy: POINT_BUY_COST, standard_array: STANDARD_ARRAY,
+      multiclass: MULTICLASS_PROFS,
+      multiclass_req: Object.fromEntries(Object.keys(MULTICLASS_REQ).map((k) => [k, multiclassReqText(k)])),
+      multiclass_req_raw: MULTICLASS_REQ,
       classes: Object.fromEntries(Object.entries(CLASS_RULES).map(([k, v]) => [k, { name: v.name, subclass_level: v.subclass_level, caster: v.caster }])),
     })],
 
@@ -222,7 +229,7 @@ export async function createApi(store, srdDoc, { extractPdf, creaturesDoc } = {}
     ['POST', '/api/characters', async (p, q, body) => ({ id: await saveChar(checkShape(body.character || newCharacter())) })],
     ['GET', '/api/characters/:id', async ({ id }) => {
       const character = await getChar(id);
-      ensureInventory(character);
+      gear.ensureInventory(character);
       return { character, version: await charVersion(id) };
     }],
     ['GET', '/api/characters/:id/version', async ({ id }) => ({ version: await charVersion(id) })],
@@ -239,8 +246,67 @@ export async function createApi(store, srdDoc, { extractPdf, creaturesDoc } = {}
     ['GET', '/api/characters/:id/export', async ({ id }) => ({ character: await getChar(id) })],
     ['POST', '/api/compute', async (p, q, body) => {
       const char = body.character || {};
-      return { sheet: compute(char, lib.buildContext(char)) };
+      return { sheet: computeAny(char, lib.buildContext(char)) };
     }],
+    ['POST', '/api/characters/:id/hand-written-copy', async ({ id }) => {
+      const char = await getChar(id);
+      if (char.mode === 'manual') throw new ApiError('This character is already hand-written.');
+      const copy = toManual(char, computeAny(char, lib.buildContext(char)));
+      return { id: await saveChar(copy) };
+    }],
+    ['POST', '/api/characters/:id/table-changes', async ({ id }, q, changes) => {
+      // a PC table copy's changes: the play state, inventory, coins and companions replace this device's
+      if (!isObj(changes) || !isObj(changes.character)) throw new ApiError('That file isn’t a table copy’s changes.');
+      const theirs = changes.character, char = await getChar(id), version = await charVersion(id);
+      let note = '';
+      if (changes.version != null && Math.abs(Number(changes.version) - version) > 1e-6) {
+        note = 'The character was also changed here after the table copy was made; the table’s hit points, slots, '
+          + 'inventory and companions were brought in, and the other changes here were kept.';
+      }
+      for (const k of ['play', 'inventory', 'coins', 'companions', 'forms', 'hp_bonus', 'notes']) if (k in theirs) char[k] = theirs[k];
+      await saveChar(char, id);
+      return { character: { ...char, id: Number(id) }, note, version: await charVersion(id) };
+    }],
+    ['POST', '/api/levelup/preview', async (p, q, d) => {
+      const char = d.character || {};
+      if (char.mode === 'manual') throw new ApiError('Hand-written sheets level up in the dialog without a preview.');
+      return { preview: levelup.preview(char, d.choice || {}, lib) };
+    }],
+    ['POST', '/api/levelup/apply', async (p, q, d) => ({ character: levelup.apply(d.character || {}, d.choice || {}, d.data || {}, lib) })],
+    ['GET', '/api/starting-gear', async (p, q) => {
+      const out = { class_name: '', class: [], wealth: null, background_name: '', background: [], background_text: '' };
+      const ce = q.get('class_id') ? lib.get(q.get('class_id')) : null;
+      if (ce) {
+        const slug = classSlug(ce);
+        out.class_name = ce.name;
+        out.class = gear.startingEquipment(slug, ce.data.equipment || []);
+        if (gear.STARTING_WEALTH[slug]) { const [dice, mult] = gear.STARTING_WEALTH[slug]; out.wealth = { dice, mult }; }
+      }
+      const be = q.get('background_id') ? lib.get(q.get('background_id')) : null;
+      if (be) {
+        const text = be.data.equipment || '';
+        Object.assign(out, { background_name: be.name, background_text: text, background: gear.backgroundItems(text) });
+      }
+      return out;
+    }],
+    ['POST', '/api/gear/from-entry', async (p, q, d) => {
+      const e = lib.get(d.id || 0);
+      if (!e) throw new ApiError('Not found', 404);
+      const v = /^\d+$/.test(String(d.variant ?? '')) ? parseInt(d.variant, 10) : null;
+      return { item: gear.itemFromEntry(e, v) };
+    }],
+    ['POST', '/api/gear/make', async (p, q, d) => {
+      const items = [];
+      for (const it of d.items || []) {
+        const name = String(it.name || '').trim();
+        if (!name) continue;
+        const item = gear.makeItem(name, Math.max(1, parseInt(it.qty, 10) || 1), it.src || '');
+        if (it.weight != null && it.weight !== '') item.weight = Number(it.weight);
+        items.push(item);
+      }
+      return { items };
+    }],
+    ['GET', '/api/template', async () => ({ template: null, fields: [], field_map: {}, unmatched: [] })],
     ['POST', '/api/entries/bulk', async (p, q, body) => ({ ids: await saveEntries(body.entries) })],
 
     // ---------------------------------------------------------- your PDFs
