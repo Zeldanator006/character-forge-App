@@ -5,9 +5,12 @@ import { ABILITIES, ALIGNMENTS, ARMOR, CLASS_RULES, POINT_BUY_COST, SKILLS, STAN
 import { Library, raceSelection, classRules } from './library.js';
 import { Pdfs } from './pdfs.js';
 import { DEFAULT_MODEL, MODELS, makeClaude } from './claude.js';
+import * as creatures from './creatures.js';
+import { spellEffect } from './dice.js';
 
 export class ApiError extends Error {
-  constructor(message, status = 400) { super(message); this.status = status; }
+  /** data: extra fields sent back with the error (a refused save returns the newer character). */
+  constructor(message, status = 400, data = null) { super(message); this.status = status; this.data = data; }
 }
 
 export function newCharacter() {
@@ -16,23 +19,69 @@ export function newCharacter() {
     name: '', player: '', alignment: '', xp: 0,
     race: {}, race_bonus: zero(), classes: [], background: {},
     ability_method: 'point_buy', base_scores: Object.fromEntries(ABILITIES.map((a) => [a, 8])),
-    improvements: zero(), feats: [], skills: [], expertise: [], tools: '', languages: '',
+    improvements: zero(), feats: [], skills: [], race_skills: [], bg_skills: [], expertise: [], tools: '', languages: '',
     hp_mode: 'average', hp_rolls: [], hp_bonus: 0,
-    armor: '', shield: false, weapons: [], equipment: '',
+    armor: '', shield: false, weapons: [], equipment: '', inventory: [], unarmed: false,
     coins: { cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 },
     spells: [], personality: { personality_traits: '', ideals: '', bonds: '', flaws: '' },
     backstory: '', appearance: '', extra_features: [], notes: '',
   };
 }
 
-const SETTINGS_DEFAULTS = { show_unearthed_arcana: false, show_homebrew: false, anthropic_api_key: '', model: DEFAULT_MODEL };
+/** A blank hand-written sheet (the PC app's claude_ai.new_manual). */
+export function newManual() {
+  return {
+    class_text: '', level: 1, race_text: '', background_text: '', save_profs: [], jack: false,
+    ac: '', ac_note: '', hp_max: '', speed: '30', hit_dice: '', init_bonus: 0, passive_bonus: 0,
+    prof_override: '', attacks: [], spell_ability: '', spell_class: '', slots: Array(9).fill(0),
+    pact_count: 0, pact_level: 0, proficiencies: '', size: '', darkvision: '',
+    lucky: false, reliable_talent: false, crit_range: 20, extra_crit_dice: 0, riders: [],
+  };
+}
+
+// The parts of a saved character the rest of the app relies on, and the type each must have when present.
+const CHARACTER_SHAPE = { race: 'object', background: 'object', classes: 'array', base_scores: 'object', race_bonus: 'object',
+  improvements: 'object', feats: 'array', spells: 'array', skills: 'array', inventory: 'array', coins: 'object',
+  personality: 'object', manual: 'object' };
+const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+/** Why this isn't a character the app can open (an Import of the wrong file), or null. */
+export function characterProblem(data) {
+  if (!isObj(data)) return 'That file isn’t a character from Character Forge.';
+  for (const [k, kind] of Object.entries(CHARACTER_SHAPE)) {
+    if (data[k] == null) continue;
+    if (kind === 'array' ? !Array.isArray(data[k]) : !isObj(data[k])) {
+      return `That file isn’t a character from Character Forge (its "${k}" doesn’t look right).`;
+    }
+  }
+  if ((data.classes || []).some((c) => !isObj(c))) return 'That file isn’t a character from Character Forge (its classes don’t look right).';
+  return null;
+}
+
+const THEME_DEFAULT = { mode: 'light', light: 'graph-paper', dark: 'midnight',
+  custom: { paper: '#eef1f4', panel: '#ffffff', ink: '#1f2329', accent: '#7a3fb0' } };
+/** The PC app's config.clean_theme: only known modes, preset names and #rrggbb colors get through. */
+function cleanTheme(theme) {
+  const base = structuredClone(THEME_DEFAULT);
+  if (['light', 'dark', 'system'].includes(theme.mode)) base.mode = theme.mode;
+  for (const slot of ['light', 'dark']) if (typeof theme[slot] === 'string' && /^[a-z0-9-]{1,40}$/.test(theme[slot])) base[slot] = theme[slot];
+  for (const [k, v] of Object.entries(theme.custom || {})) {
+    if (k in base.custom && typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v)) base.custom[k] = v.toLowerCase();
+  }
+  return base;
+}
+
+const SETTINGS_DEFAULTS = { show_unearthed_arcana: false, show_homebrew: false, anthropic_api_key: '', model: DEFAULT_MODEL,
+  theme: THEME_DEFAULT };
 const now = () => Date.now() / 1000;
 const summaryOf = (c) => {
   const classes = (c.data.classes || []).map((k) => `${k.name || '?'} ${k.level || 1}`).join(', ');
   return [((c.data.race || {}).name) || '', classes].filter(Boolean).join(' · ');
 };
 
-export async function createApi(store, srdDoc, { extractPdf } = {}) {
+export async function createApi(store, srdDoc, { extractPdf, creaturesDoc } = {}) {
+  // stat blocks for companions and Wild Shape (SRD 5.1); tests hand them in, the app fetches them
+  if (creaturesDoc) creatures.setCreatures(creaturesDoc);
+  else await creatures.loadCreatures();
   const lib = new Library(store, srdDoc.entries);
   await lib.load();
   const pdfs = new Pdfs(store, extractPdf);
@@ -76,6 +125,17 @@ export async function createApi(store, srdDoc, { extractPdf } = {}) {
     if (id != null) row.id = Number(id);
     return store.put('characters', row);
   };
+  /** A character's version is when it was last saved; a save based on an older one is refused. */
+  const charVersion = async (id) => {
+    const row = await store.get('characters', Number(id));
+    if (!row) throw new ApiError('Not found', 404);
+    return row.updated;
+  };
+  const checkShape = (data) => {
+    const problem = characterProblem(data);
+    if (problem) throw new ApiError(problem);
+    return data;
+  };
 
   // [method, pattern, handler(params, query, body)]
   const routes = [
@@ -88,6 +148,7 @@ export async function createApi(store, srdDoc, { extractPdf } = {}) {
       if (body.anthropic_api_key) s.anthropic_api_key = String(body.anthropic_api_key).trim();
       if (body.clear_api_key) s.anthropic_api_key = '';
       if (body.model && MODELS.includes(body.model)) s.model = body.model;
+      if (isObj(body.theme)) s.theme = cleanTheme(body.theme);
       await store.put('settings', { id: 'app', value: s });
       return { config: publicSettings(s) };
     }],
@@ -126,6 +187,23 @@ export async function createApi(store, srdDoc, { extractPdf } = {}) {
     ['GET', '/api/classes/:slug/spells', async ({ slug }, q) => ({
       spells: lib.classSpells(slug, await tags(q), Number(q.get('max') ?? 9)),
     })],
+    ['GET', '/api/spells', async (p, q) => ({ spells: lib.allSpells(await tags(q), Number(q.get('max') ?? 9)) })],
+    ['GET', '/api/spell-effect/:id', async ({ id }, q) => {
+      const e = lib.get(id);
+      if (!e || e.kind !== 'spell') throw new ApiError('Not a spell', 404);
+      return { effect: spellEffect(e.data, parseInt(q.get('level') || '1', 10) || 1) };
+    }],
+    ['POST', '/api/class-options', async (p, q, d) => ({ groups: lib.classOptionGroups(d.character || {}, await tags(q)) })],
+    ['GET', '/api/magic-items', async (p, q) => ({ items: lib.magicItems(await tags(q)) })],
+    ['POST', '/api/creatures/search', async (p, q, d) => ({
+      creatures: creatures.search(d.q || '', d.mode in creatures.MODES ? d.mode : 'any', d.info || {}),
+      source: 'SRD 5.1 (CC-BY-4.0)',
+    })],
+    ['GET', '/api/creatures/:name', async ({ name }) => {
+      const c = creatures.byName(name);
+      if (!c) throw new ApiError(`No creature called ${name}`, 404);
+      return { creature: creatures.full(c) };
+    }],
     ['GET', '/api/classes/:slug/subclasses', async ({ slug }, q) => ({ entries: lib.subclassesFor(slug, await tags(q)) })],
 
     ['GET', '/api/characters', async () => {
@@ -133,13 +211,29 @@ export async function createApi(store, srdDoc, { extractPdf } = {}) {
       rows.sort((a, b) => b.updated - a.updated);
       return { characters: rows.map((r) => ({ id: r.id, name: r.name || 'Unnamed', updated: r.updated, summary: summaryOf(r) })) };
     }],
-    ['GET', '/api/characters/new', async () => ({ character: newCharacter() })],
-    ['POST', '/api/characters', async (p, q, body) => ({ id: await saveChar(body.character || newCharacter()) })],
-    ['GET', '/api/characters/:id', async ({ id }) => ({ character: await getChar(id) })],
+    ['GET', '/api/characters/new', async (p, q) => {
+      const character = newCharacter();
+      if (q.get('mode') === 'manual') {
+        Object.assign(character, { mode: 'manual', ability_method: 'manual', manual: newManual(),
+          base_scores: Object.fromEntries(Object.keys(character.base_scores).map((a) => [a, 10])) });
+      }
+      return { character };
+    }],
+    ['POST', '/api/characters', async (p, q, body) => ({ id: await saveChar(checkShape(body.character || newCharacter())) })],
+    ['GET', '/api/characters/:id', async ({ id }) => {
+      const character = await getChar(id);
+      ensureInventory(character);
+      return { character, version: await charVersion(id) };
+    }],
+    ['GET', '/api/characters/:id/version', async ({ id }) => ({ version: await charVersion(id) })],
     ['PUT', '/api/characters/:id', async ({ id }, q, body) => {
-      await getChar(id);
-      await saveChar(body.character || {}, id);
-      return { ok: true };
+      const data = checkShape(body.character || {});
+      const current = await charVersion(id);
+      if (body.version != null && Math.abs(Number(body.version) - current) > 1e-6) {
+        throw new ApiError('This character was changed in another window.', 409, { character: await getChar(id), version: current });
+      }
+      await saveChar(data, id);
+      return { ok: true, version: await charVersion(id) };
     }],
     ['DELETE', '/api/characters/:id', async ({ id }) => { await store.delete('characters', Number(id)); return { ok: true }; }],
     ['GET', '/api/characters/:id/export', async ({ id }) => ({ character: await getChar(id) })],
