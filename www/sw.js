@@ -1,10 +1,11 @@
 /* Offline support: keeps the app's own files on the device so it opens without a connection.
    Bump VERSION whenever a file below changes, so devices fetch the new copies. */
-const VERSION = 'v1';
+const VERSION = 'v5';
 const CACHE = `character-forge-${VERSION}`;
 const FILES = [
   './', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest',
-  'js/api.js', 'js/library.js', 'js/rules.js', 'js/srd.js', 'js/store.js',
+  'js/api.js', 'js/claude.js', 'js/library.js', 'js/pdfs.js', 'js/rules.js', 'js/srd.js', 'js/store.js',
+  'vendor/anthropic-sdk.mjs', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs',
   'data/srd-2014.json',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png', 'icons/apple-touch-icon.png',
 ];

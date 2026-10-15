@@ -4,7 +4,8 @@
    - idbStore(): IndexedDB in the browser (and inside the Android/iOS app wrapper)
    - memoryStore(): plain objects, for tests */
 
-const TABLES = ['characters', 'entries', 'settings'];
+const TABLES = ['characters', 'entries', 'settings', 'pdfs', 'pdf_files'];
+const VERSION = 2;  // 1: characters, entries, settings; 2: added pdfs, pdf_files
 
 export function memoryStore() {
   const data = Object.fromEntries(TABLES.map((t) => [t, new Map()]));
@@ -27,7 +28,7 @@ export function memoryStore() {
 export function idbStore(name = 'character-forge') {
   let dbp;
   const open = () => dbp || (dbp = new Promise((resolve, reject) => {
-    const req = indexedDB.open(name, 1);
+    const req = indexedDB.open(name, VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
       for (const t of TABLES) {

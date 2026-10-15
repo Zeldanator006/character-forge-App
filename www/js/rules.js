@@ -217,7 +217,9 @@ export function compute(char, ctx) {
     const [cat, base, maxdexRaw] = armor;
     let maxdex = maxdexRaw;
     if (cat === 'medium' && hasFeat(feats, 'Medium Armor Master')) maxdex = 3;
-    ac = base + (maxdex == null ? mods.dex : Math.min(mods.dex, maxdex));
+    if (maxdex == null) ac = base + mods.dex;
+    else if (maxdex === 0) ac = base;  // heavy armor ignores Dexterity, penalties included
+    else ac = base + Math.min(mods.dex, maxdex);
     acNote = armorName;
     if (!armorProfs.has(cat)) warnings.push(`Not proficient with ${cat} armor (${armorName}).`);
   } else {

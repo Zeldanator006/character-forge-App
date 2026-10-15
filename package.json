@@ -6,6 +6,12 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "start": "python3 -m http.server 8080 --directory www"
+    "start": "python3 -m http.server 8080 --directory www",
+    "vendor": "sh tools/vendor.sh"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "0.129.0",
+    "esbuild": "0.28.2",
+    "pdfjs-dist": "6.3.289"
   }
 }

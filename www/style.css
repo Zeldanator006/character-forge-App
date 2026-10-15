@@ -38,6 +38,8 @@ a { color: var(--pen); }
 }
 .brand { font: 600 20px/1 var(--serif); letter-spacing: .2px; white-space: nowrap; }
 .brand small { font: 13px var(--sans); color: var(--pencil); margin-left: 8px; }
+.brand { display: flex; align-items: center; gap: 8px; }
+.brand img { border-radius: 6px; flex: none; }
 .top nav { display: flex; gap: 4px; flex-wrap: wrap; }
 .top nav button {
   border: 0; background: none; padding: 8px 12px; border-radius: var(--radius);
@@ -249,6 +251,16 @@ details.feature .prose { margin: 6px 0 4px 16px; }
   .top { position: static; flex-direction: row; align-items: center; gap: 6px; padding: 8px 12px; }
   .brand { font-size: 17px; }
   .brand small { display: none; }
+  .top nav button { font-size: 15px; }
+}
+@media (max-width: 480px) {
+  .brand-name { display: none; }   /* the icon stands in for the name so all four tabs fit */
+}
+@media (max-width: 360px) {
+  .top { padding-left: 8px; padding-right: 8px; }
+  .top { gap: 2px; }
+  .brand img { width: 24px; height: 24px; }
+  .top nav button { padding: 10px 4px; font-size: 14px; }
   .top nav { flex-wrap: nowrap; overflow-x: auto; margin-left: auto; }
   .top nav button { white-space: nowrap; padding: 10px 8px; }
   .steps { position: sticky; top: 0; z-index: 15; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none;

@@ -160,7 +160,7 @@ function go(view) {
     const on = b.dataset.view === view || (view === 'builder' && b.dataset.view === 'characters');
     if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   });
-  ({ characters: renderCharacters, builder: renderBuilder, library: renderLibrary, settings: renderSettings })[view]();
+  ({ characters: renderCharacters, builder: renderBuilder, library: renderLibrary, pdfs: renderPdfs, settings: renderSettings })[view]();
   window.scrollTo(0, 0);
 }
 
@@ -185,7 +185,7 @@ async function renderCharacters() {
         <td class="muted small">${new Date(c.updated * 1000).toLocaleString()}</td>
         <td style="text-align:right"><button class="btn quiet danger" data-act="del-char" data-id="${c.id}" aria-label="Delete ${esc(c.name)}">Delete</button></td></tr>`).join('')}
       </tbody></table></div>`
-    : `<div class="panel"><p>No characters yet. Make your first one: pick a species, class and background, and the sheet fills itself in as you go.</p>
+    : `<div class="panel"><p>No characters yet. Start one from scratch, or describe an idea and let Claude draft it. The sheet fills itself in as you go.</p>
        <button class="btn primary" data-act="new-char">New character</button></div>`}`;
   $('#import-json').addEventListener('change', async (e) => {
     const f = e.target.files[0];
@@ -212,7 +212,7 @@ async function openChar(id, step = 'basics') {
 
 /* ================================================================ builder */
 const STEPS = [
-  ['basics', 'Basics'], ['species', 'Species'], ['class', 'Class'],
+  ['concept', 'Start from an idea'], ['basics', 'Basics'], ['species', 'Species'], ['class', 'Class'],
   ['background', 'Background'], ['abilities', 'Ability scores'], ['skills', 'Skills'], ['feats', 'Feats & improvements'],
   ['spells', 'Spells'], ['equipment', 'Equipment & HP'], ['story', 'Personality & story'], ['sheet', 'Character sheet'],
 ];
@@ -299,6 +299,26 @@ function renderLive() {
 
 /* ---------------------------------------------------------------- steps */
 const STEP_RENDER = {};
+
+STEP_RENDER.concept = async () => {
+  const st = S.status || (S.status = await api('/api/status'));
+  const total = (S.char.classes || []).reduce((t, c) => t + (c.level || 1), 0) || 1;
+  return `<div class="panel"><h2>Start from an idea</h2>
+    <p class="hint">Describe who you want to play. Claude picks the species, class, background, scores, skills, spells and gear from your library (the built-in rules plus anything you added or pulled from your PDFs), and you can change any of it in the next steps.</p>
+    ${st.config.api_key_set ? '' : `<p class="note">No API key needed: the app gives you two prompts to paste into a Claude chat, and you paste each reply back. With a key in <a href="#" data-act="go" data-view="settings">Settings</a>, it does this for you.</p>`}
+    <label class="field"><span>Character idea</span>
+      <textarea rows="5" data-bind="concept" placeholder="A grumpy dwarf cleric who used to brew ale for a monastery, good in a brawl">${esc(S.char.concept || '')}</textarea></label>
+    <div class="row">
+      <label class="field" style="margin:0"><span>Level</span><input type="number" min="1" max="20" id="draft-level" value="${total}"></label>
+      ${st.config.api_key_set
+        ? `<button class="btn primary" data-act="draft" style="align-self:flex-end">Draft with Claude</button>
+           <button class="btn quiet" data-act="chat-draft-start" style="align-self:flex-end">Use a Claude chat instead</button>`
+        : `<button class="btn primary" data-act="chat-draft-start" style="align-self:flex-end">Copy step 1 prompt</button>`}
+    </div>
+    <div id="chat-draft">${S.chatDraft ? chatBox(S.chatDraft) : ''}</div>
+    <div id="draft-result"></div></div>
+    <p class="hint" style="margin-top:12px">Rather build it yourself? Skip ahead to Basics.</p>`;
+};
 
 STEP_RENDER.basics = async () => {
   const c = S.char;
@@ -733,13 +753,86 @@ async function libSearch() {
   } catch (e) { box.innerHTML = `<div class="note warn">${esc(e.message)}</div>`; }
 }
 
+/* ================================================================ PDFs view */
+async function renderPdfs() {
+  const [{ pdfs }, status] = await Promise.all([api('/api/pdfs'), api('/api/status')]);
+  S.status = status;
+  const keySet = status.config.api_key_set;
+  $('#main').innerHTML = `<h1>Your PDFs</h1>
+    <p class="hint">Add sourcebooks, supplements or homebrew you own. They stay on this device and their text becomes searchable; Claude can pull spells, species, feats, backgrounds, classes and subclasses out of chosen pages so they appear in the builder next to the built-in ones.</p>
+    <label class="drop" id="drop"><input type="file" accept=".pdf" multiple id="pdf-file">
+      <b>Drop PDFs here</b> or tap to choose files</label>
+    <div id="upload-out"></div>
+    ${pdfs.length ? `<div class="panel" style="margin-top:16px"><table class="list"><thead><tr><th>Book</th><th>Pages</th><th>Entries pulled</th><th></th></tr></thead><tbody>
+      ${pdfs.map((p) => `<tr><td><a href="#" data-act="open-pdf" data-id="${p.id}">${esc(p.title)}</a><div class="small muted">${esc(p.filename)}</div>
+        ${p.scanned ? '<div class="small" style="color:var(--warn)">Little or no text found: this looks like a scanned book. Run it through OCR first (for example, “Make searchable” in a PDF editor).</div>' : ''}</td>
+        <td class="num">${p.pages}</td><td class="num">${p.entries}</td>
+        <td style="text-align:right"><button class="btn quiet danger" data-act="del-pdf" data-id="${p.id}">Remove</button></td></tr>`).join('')}</tbody></table></div>
+
+    <div class="two-pane" style="margin-top:16px">
+      <div class="panel"><h3>Search your books</h3>
+        <div class="row"><input type="search" id="pdf-q" placeholder="e.g. hexblade curse" class="grow"><button class="btn" data-act="pdf-search">Search</button></div>
+        <div id="pdf-results" style="margin-top:10px"></div></div>
+      <div class="panel"><h3>Pull entries with Claude</h3>
+        <p class="hint">Pick a book and a page range (30 pages or fewer works best), say what’s on those pages, and review what Claude finds before saving it.</p>
+        <div class="grid2">
+          <label class="field"><span>Book</span><select id="ex-pdf">${pdfs.map((p) => `<option value="${p.id}">${esc(p.title)}</option>`).join('')}</select></label>
+          <label class="field"><span>What’s on the pages</span><select id="ex-kind">
+            ${[['spell', 'Spells'], ['race', 'Species'], ['subclass', 'Subclasses'], ['class', 'A whole class'], ['feat', 'Feats'], ['background', 'Backgrounds'], ['item', 'Magic items'], ['other', 'Other rules']].map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></label>
+          <label class="field"><span>From page</span><input type="number" id="ex-start" min="1" value="1"></label>
+          <label class="field"><span>To page</span><input type="number" id="ex-end" min="1" value="5"></label></div>
+        <div class="row"><button class="btn" data-act="preview-pages">Preview page text</button>
+          ${keySet ? '<button class="btn primary" data-act="extract">Pull entries</button><button class="btn quiet" data-act="chat-extract-start">Use a Claude chat instead</button>'
+            : '<button class="btn primary" data-act="chat-extract-start">Copy prompt for Claude</button>'}</div>
+        ${keySet ? '' : '<p class="hint small" style="margin-top:8px">Without an API key, you paste the prompt into a Claude chat and paste the reply back here. Around 15 pages at a time pastes comfortably.</p>'}
+        <div id="extract-out" style="margin-top:12px"></div></div></div>` : ''}`;
+  const drop = $('#drop'), input = $('#pdf-file');
+  input.addEventListener('change', () => uploadPdfs(input.files));
+  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('over'); uploadPdfs(e.dataTransfer.files); });
+  const q = $('#pdf-q');
+  if (q) q.addEventListener('keydown', (e) => { if (e.key === 'Enter') ACTIONS['pdf-search'](); });
+}
+async function uploadPdfs(files) {
+  if (!files || !files.length) return;
+  const out = $('#upload-out');
+  out.innerHTML = `<p class="loading">Reading ${files.length} PDF${files.length > 1 ? 's' : ''}… large books take a minute.</p>`;
+  try {
+    const { results } = await api('/api/pdfs', { files: [...files] });
+    const bad = results.filter((r) => r.error);
+    toast(`Added ${results.length - bad.length} PDF${results.length - bad.length === 1 ? '' : 's'}.`);
+    await renderPdfs();
+    if (bad.length) $('#upload-out').innerHTML = bad.map((b) => `<div class="note warn">${esc(b.filename)}: ${esc(b.error)}</div>`).join('');
+  } catch (e) { out.innerHTML = `<div class="note warn">${esc(e.message)}</div>`; }
+}
+function renderExtract() {
+  const box = $('#extract-out');
+  const ex = S.extract;
+  if (!box || !ex) return;
+  box.innerHTML = `${ex.notes ? `<p class="note">${esc(ex.notes)}</p>` : ''}
+    ${ex.entries.length ? `<p>${ex.entries.length} found. Untick anything you don’t want, then save.</p>
+      ${ex.entries.map((e, i) => `<div style="border-bottom:1px solid var(--grid);padding:6px 0"><label class="check"><input type="checkbox" data-ex="${i}" checked>
+        <b>${esc(e.name)}</b> <span class="muted small">${esc(KIND_LABEL[e.kind])}${e.parent ? ' for ' + esc(e.parent) : ''}, ${esc(e.path.replace('p.', 'page '))}</span></label>
+        <details><summary class="small" style="cursor:pointer">Preview</summary>${renderEntry({ ...e, id: '', tags: [] }).replace(/<div class="row" style="margin-top:14px">[\s\S]*$/, '')}</details></div>`).join('')}
+      <button class="btn primary" data-act="save-extract" style="margin-top:10px">Save to library</button>` : '<p>Nothing found on those pages. Check the page range with Preview page text.</p>'}`;
+}
+
 /* ================================================================ settings view */
 async function renderSettings() {
   const status = await api('/api/status');
   S.status = status;
   let persisted = null;
   try { persisted = navigator.storage && navigator.storage.persisted ? await navigator.storage.persisted() : null; } catch (e) { /* unknown */ }
+  const c = status.config;
   $('#main').innerHTML = `<h1>Settings</h1>
+  <div class="panel" style="margin-bottom:16px"><h2>Claude</h2>
+    <p class="hint">Optional. Without a key, drafting characters and pulling entries from PDFs work by copying prompts into a Claude chat and pasting the replies back. With a key from the Claude Console (platform.claude.com, under Settings, API keys), the app does it in one tap; calls are billed to that account, usually a few cents per character.</p>
+    <div class="grid2"><label class="field"><span>Anthropic API key ${c.api_key_set ? `<span class="muted">(saved, ends ${esc(c.api_key_hint)})</span>` : ''}</span>
+      <input type="password" id="api-key" placeholder="${c.api_key_set ? 'Paste a new key to replace it' : 'sk-ant-…'}" autocomplete="off"></label>
+      <label class="field"><span>Model</span><select id="model">${c.models.map((m) => `<option ${m === c.model ? 'selected' : ''}>${m}</option>`).join('')}</select></label></div>
+    <div class="row"><button class="btn primary" data-act="save-claude">Save</button>${c.api_key_set ? '<button class="btn quiet danger" data-act="clear-key">Remove saved key</button>' : ''}</div>
+    <p class="hint small" style="margin-top:8px">The key is saved on this device only and sent only to Anthropic. Anyone who can open the app on this device can use it, so remove it before lending the device out.</p></div>
   <div class="panel" style="margin-bottom:16px"><h2>Your data</h2>
     <p class="hint">Characters and entries you add are saved on this device only. Back them up to keep them safe or to move them to another device.</p>
     ${persisted === false ? '<p class="note">This browser may clear saved data if the device runs low on space. Installing the app (Add to Home screen) or making regular backups keeps your characters safe.</p>' : ''}
@@ -779,6 +872,53 @@ async function renderSettings() {
   });
 }
 
+/* ================================================================ copy-and-paste with a Claude chat */
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* fall back below */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.append(ta); ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch (e) { return false; }
+}
+
+function chatBox(job, copied) {
+  const isDraft = job.kind === 'draft';
+  const title = isDraft ? `Step ${job.stage} of 2` : 'Pull entries with a Claude chat';
+  const where = isDraft && job.stage === 2 ? 'into the same Claude chat' : 'into a new Claude chat';
+  const status = copied === false ? 'Copy the prompt below' : 'The prompt is copied. Paste it';
+  return `<div class="panel" data-chat="${isDraft ? 'draft' : 'extract'}" style="margin-top:14px;border-color:var(--pen)">
+    <h3>${title}</h3>
+    <p>${status} ${where} and send it. When Claude answers, copy its whole reply and paste it below.</p>
+    <div class="row" style="margin-bottom:10px">
+      <a class="btn" href="https://claude.ai/new" target="_blank" rel="noopener">Open a new Claude chat</a>
+      <button class="btn" data-act="chat-copy">Copy the prompt again</button>
+      <button class="btn quiet" data-act="chat-cancel">Cancel</button></div>
+    <details ${copied === false ? 'open' : ''}><summary class="small" style="cursor:pointer">See the prompt</summary>
+      <textarea readonly rows="6" style="margin-top:6px;font-size:13px">${esc(job.prompt)}</textarea></details>
+    <label class="field" style="margin-top:10px"><span>Claude’s reply</span>
+      <textarea class="chat-reply" rows="6" placeholder="Paste the reply here. It should start with {"></textarea></label>
+    <button class="btn primary" data-act="chat-reply">Use this reply</button></div>`;
+}
+
+async function useDraft(res) {
+  S.char = { ...res.character, concept: S.char.concept };
+  S.raceSel = null;
+  await saveNow();
+  await computeNow();
+  const out = $('#draft-result');
+  if (out) {
+    out.innerHTML = `<div class="note good">Drafted ${esc(S.char.name)}. Look through each step to adjust anything.</div>
+      ${res.notes ? `<div class="prose">${prose(res.notes)}</div>` : ''}
+      ${res.warnings.length ? `<div class="note warn">${res.warnings.map(esc).join('<br>')}</div>` : ''}
+      <button class="btn primary" data-act="step" data-step="sheet">See the sheet</button>`;
+  }
+  renderSteps();
+}
+
 /* ================================================================ actions */
 const ACTIONS = {
   go: (t, e) => { e.preventDefault(); go(t.dataset.view); },
@@ -786,7 +926,7 @@ const ACTIONS = {
   'new-char': async (t) => busy(t, 'Creating…', async () => {
     const { character } = await api('/api/characters/new');
     const { id } = await api('/api/characters', { json: { character } });
-    await openChar(id, 'basics');
+    await openChar(id, 'concept');
   }),
   'open-char': (t, e) => { if (e.target.closest('[data-act="del-char"]')) return; openChar(+t.dataset.id); },
   'del-char': async (t, e) => {
@@ -902,6 +1042,113 @@ const ACTIONS = {
     S.lists = {};
     toast(`Saved ${name}.`);
     $('#own-name').value = ''; $('#own-text').value = '';
+  },
+  draft: (t) => busy(t, 'Claude is drafting… (about a minute)', async () => {
+    if ((S.char.classes || []).some((c) => c.id) && !confirm('Replace this character’s current choices with a new draft?')) return;
+    const level = +($('#draft-level').value || 1);
+    const res = await api('/api/claude/draft', { json: { concept: S.char.concept || '', level } });
+    await useDraft(res);
+  }),
+  'chat-draft-start': (t) => busy(t, 'Building the prompt…', async () => {
+    if (!(S.char.concept || '').trim()) throw new Error('Describe the character first.');
+    if ((S.char.classes || []).some((c) => c.id) && !confirm('Replace this character’s current choices with a new draft?')) return;
+    const level = +($('#draft-level').value || 1);
+    const { prompt } = await api('/api/claude/chat/draft-prompt', { json: { concept: S.char.concept, level } });
+    S.chatDraft = { kind: 'draft', stage: 1, prompt };
+    const copied = await copyText(prompt);
+    $('#chat-draft').innerHTML = chatBox(S.chatDraft, copied);
+  }),
+  'chat-copy': async (t) => {
+    const box = t.closest('[data-chat]');
+    const job = box.dataset.chat === 'draft' ? S.chatDraft : S.chatExtract;
+    const ok = await copyText(job.prompt);
+    toast(ok ? 'Prompt copied.' : 'Couldn’t copy automatically; open “See the prompt” and copy it from there.', ok ? 'info' : 'error');
+  },
+  'chat-reply': (t) => busy(t, 'Reading the reply…', async () => {
+    const box = t.closest('[data-chat]');
+    const reply = $('.chat-reply', box).value;
+    if (box.dataset.chat === 'extract') {
+      const job = S.chatExtract;
+      S.extract = await api(`/api/pdfs/${job.pdf}/extract/reply`, { json: { kind: job.kind, reply } });
+      S.chatExtract = null;
+      renderExtract();
+      return;
+    }
+    const job = S.chatDraft;
+    if (job.stage === 1) {
+      const r = await api('/api/claude/chat/draft-reply-1', { json: { concept: S.char.concept, reply } });
+      S.chatDraft = { kind: 'draft', stage: 2, prompt: r.prompt, character: r.character, warnings: r.warnings, summary: r.summary };
+      const copied = await copyText(r.prompt);
+      $('#chat-draft').innerHTML = chatBox(S.chatDraft, copied);
+    } else {
+      const res = await api('/api/claude/chat/draft-reply-2', { json: { character: job.character, reply, warnings: job.warnings, summary: job.summary } });
+      S.chatDraft = null;
+      $('#chat-draft').innerHTML = '';
+      await useDraft(res);
+    }
+  }),
+  'chat-cancel': (t) => {
+    const box = t.closest('[data-chat]');
+    if (box.dataset.chat === 'draft') S.chatDraft = null; else S.chatExtract = null;
+    box.remove();
+  },
+  'chat-extract-start': (t) => busy(t, 'Building the prompt…', async () => {
+    const body = { start: +$('#ex-start').value, end: +$('#ex-end').value, kind: $('#ex-kind').value };
+    if (body.end < body.start) throw new Error('The last page comes before the first.');
+    const pdf = $('#ex-pdf').value;
+    const { prompt } = await api(`/api/pdfs/${pdf}/extract/prompt`, { json: body });
+    S.chatExtract = { kind: body.kind, pdf, prompt };
+    const copied = await copyText(prompt);
+    $('#extract-out').innerHTML = chatBox(S.chatExtract, copied);
+  }),
+  'del-pdf': async (t) => {
+    if (!confirm('Remove this PDF and the entries pulled from it?')) return;
+    await api(`/api/pdfs/${t.dataset.id}`, { method: 'DELETE' });
+    S.lists = {}; renderPdfs();
+  },
+  'pdf-search': async () => {
+    const q = $('#pdf-q').value.trim();
+    if (!q) return;
+    const { results } = await api(`/api/pdfs/search?q=${encodeURIComponent(q)}`);
+    $('#pdf-results').innerHTML = results.length ? results.map((r) => `<div style="border-bottom:1px solid var(--grid);padding:6px 0">
+      <a href="#" data-act="open-pdf" data-id="${r.pdf_id}" data-page="${r.page}">${esc(r.title)}, page ${r.page}</a>
+      <div class="small">${esc(r.snip).replace(/\[\[/g, '<mark>').replace(/\]\]/g, '</mark>')}</div></div>`).join('') : '<p class="hint">No matches.</p>';
+  },
+  'preview-pages': async () => {
+    const id = $('#ex-pdf').value, s = $('#ex-start').value, e = $('#ex-end').value;
+    const { text } = await api(`/api/pdfs/${id}/pages?start=${s}&end=${e}`);
+    const back = document.createElement('div');
+    back.className = 'modal-back';
+    back.innerHTML = `<div class="modal"><button class="btn quiet close" data-act="close-modal">Close</button><h3>Pages ${s}–${e}</h3>
+      <pre style="white-space:pre-wrap;font:13px/1.45 var(--sans)">${esc(text || 'No text on these pages.')}</pre></div>`;
+    back.addEventListener('click', (ev) => { if (ev.target === back) back.remove(); });
+    document.body.append(back);
+  },
+  extract: (t) => busy(t, 'Claude is reading… (up to a few minutes)', async () => {
+    const body = { start: +$('#ex-start').value, end: +$('#ex-end').value, kind: $('#ex-kind').value };
+    if (body.end < body.start) throw new Error('The last page comes before the first.');
+    S.extract = await api(`/api/pdfs/${$('#ex-pdf').value}/extract`, { json: body });
+    renderExtract();
+  }),
+  'save-extract': async (t) => busy(t, 'Saving…', async () => {
+    const keep = $$('[data-ex]').filter((c) => c.checked).map((c) => S.extract.entries[+c.dataset.ex]);
+    await api('/api/entries/bulk', { json: { entries: keep } });
+    S.lists = {};
+    toast(`Saved ${keep.length} entr${keep.length === 1 ? 'y' : 'ies'}. They now appear in the builder.`);
+    S.extract = null;
+    renderPdfs();
+  }),
+  'save-claude': (t) => busy(t, 'Saving…', async () => {
+    await api('/api/settings', { json: { anthropic_api_key: $('#api-key').value, model: $('#model').value } });
+    toast('Saved.'); renderSettings();
+  }),
+  'clear-key': async () => { await api('/api/settings', { json: { clear_api_key: true } }); renderSettings(); },
+  'open-pdf': async (t, e) => {
+    e.preventDefault();
+    const win = window.open('', '_blank');  // open first, while the tap still counts as a user action (pop-up blockers)
+    const { blob } = await api(`/api/pdfs/${t.dataset.id}/file`);
+    const url = URL.createObjectURL(blob) + (t.dataset.page ? `#page=${t.dataset.page}` : '');
+    if (win) win.location.href = url; else location.href = url;
   },
   'export-json': async () => {
     await saveNow();

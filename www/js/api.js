@@ -3,6 +3,8 @@
 import { compute } from './rules.js';
 import { ABILITIES, ALIGNMENTS, ARMOR, CLASS_RULES, POINT_BUY_COST, SKILLS, STANDARD_ARRAY, WEAPONS } from './srd.js';
 import { Library, raceSelection, classRules } from './library.js';
+import { Pdfs } from './pdfs.js';
+import { DEFAULT_MODEL, MODELS, makeClaude } from './claude.js';
 
 export class ApiError extends Error {
   constructor(message, status = 400) { super(message); this.status = status; }
@@ -23,18 +25,41 @@ export function newCharacter() {
   };
 }
 
-const SETTINGS_DEFAULTS = { show_unearthed_arcana: false, show_homebrew: false };
+const SETTINGS_DEFAULTS = { show_unearthed_arcana: false, show_homebrew: false, anthropic_api_key: '', model: DEFAULT_MODEL };
 const now = () => Date.now() / 1000;
 const summaryOf = (c) => {
   const classes = (c.data.classes || []).map((k) => `${k.name || '?'} ${k.level || 1}`).join(', ');
   return [((c.data.race || {}).name) || '', classes].filter(Boolean).join(' · ');
 };
 
-export async function createApi(store, srdDoc) {
+export async function createApi(store, srdDoc, { extractPdf } = {}) {
   const lib = new Library(store, srdDoc.entries);
   await lib.load();
+  const pdfs = new Pdfs(store, extractPdf);
+  const claude = makeClaude({ lib, pdfs });
 
   const settings = async () => ({ ...SETTINGS_DEFAULTS, ...(((await store.get('settings', 'app')) || {}).value || {}) });
+  /** Settings safe to show in the interface: never the key itself. */
+  const publicSettings = (s) => {
+    const { anthropic_api_key: key, ...rest } = s;
+    return { ...rest, api_key_set: Boolean(key), api_key_hint: key.length > 8 ? `…${key.slice(-4)}` : '', models: MODELS };
+  };
+  const claudeConfig = async () => { const s = await settings(); return { apiKey: s.anthropic_api_key, model: s.model }; };
+  const level = (v) => Math.max(1, Math.min(20, parseInt(v, 10) || 1));
+  const requireConcept = (d) => {
+    if (!(d.concept || '').trim()) throw new ApiError('Describe the character first.');
+    return d.concept.trim();
+  };
+  const saveEntries = async (entries) => {
+    const ids = [];
+    for (const e of entries || []) if (e && e.name) ids.push(await lib.add(e));
+    return ids;
+  };
+  const entryCounts = () => {
+    const counts = {};
+    for (const e of lib.entries) if (e.source.startsWith('pdf:')) counts[e.source] = (counts[e.source] || 0) + 1;
+    return counts;
+  };
   const tags = async (q) => {
     if (q.get('all') === '1') return ['ua', 'homebrew'];
     const s = await settings();
@@ -55,13 +80,16 @@ export async function createApi(store, srdDoc) {
   // [method, pattern, handler(params, query, body)]
   const routes = [
     ['GET', '/api/status', async () => ({
-      config: { ...(await settings()), api_key_set: false, models: [] }, library: lib.status(), pdfs: 0, template: null,
+      config: publicSettings(await settings()), library: lib.status(), pdfs: (await store.all('pdfs')).length, template: null,
     })],
     ['POST', '/api/settings', async (p, q, body) => {
       const s = await settings();
-      for (const k of Object.keys(SETTINGS_DEFAULTS)) if (k in body) s[k] = Boolean(body[k]);
+      for (const k of ['show_unearthed_arcana', 'show_homebrew']) if (k in body) s[k] = Boolean(body[k]);
+      if (body.anthropic_api_key) s.anthropic_api_key = String(body.anthropic_api_key).trim();
+      if (body.clear_api_key) s.anthropic_api_key = '';
+      if (body.model && MODELS.includes(body.model)) s.model = body.model;
       await store.put('settings', { id: 'app', value: s });
-      return { config: s };
+      return { config: publicSettings(s) };
     }],
     ['GET', '/api/srd', async () => ({
       skills: SKILLS,
@@ -117,26 +145,73 @@ export async function createApi(store, srdDoc) {
       const char = body.character || {};
       return { sheet: compute(char, lib.buildContext(char)) };
     }],
+    ['POST', '/api/entries/bulk', async (p, q, body) => ({ ids: await saveEntries(body.entries) })],
+
+    // ---------------------------------------------------------- your PDFs
+    ['GET', '/api/pdfs', async () => ({ pdfs: await pdfs.list(entryCounts()) })],
+    ['POST', '/api/pdfs', async (p, q, body, files) => {
+      if (!files || !files.length) throw new ApiError('No file received');
+      const results = [];
+      for (const f of files) {
+        if (!/\.pdf$/i.test(f.name || '')) { results.push({ filename: f.name, error: 'Not a PDF' }); continue; }
+        try { results.push(await pdfs.ingest(f)); } catch (e) { results.push({ filename: f.name, error: e.message }); }
+      }
+      return { results };
+    }],
+    ['DELETE', '/api/pdfs/:id', async ({ id }, q) => {
+      const gone = await pdfs.remove(id);
+      if (gone && q.get('keep_entries') !== '1') {
+        for (const e of lib.entries.filter((x) => x.source === `pdf:${gone.filename}`)) await lib.remove(e.id);
+      }
+      return { ok: Boolean(gone) };
+    }],
+    ['GET', '/api/pdfs/search', async (p, q) => ({ results: await pdfs.search(q.get('q') || '') })],
+    ['GET', '/api/pdfs/:id/pages', async ({ id }, q) => {
+      const start = parseInt(q.get('start') || '1', 10);
+      return { text: await pdfs.pageRangeText(id, start, parseInt(q.get('end') || String(start), 10)) };
+    }],
+    ['GET', '/api/pdfs/:id/file', async ({ id }) => {
+      const blob = await pdfs.file(id);
+      if (!blob) throw new ApiError('Not found', 404);
+      return { blob };
+    }],
+    ['POST', '/api/pdfs/:id/extract/prompt', async ({ id }, q, d) => ({
+      prompt: await claude.extractPrompt(id, parseInt(d.start, 10) || 1, parseInt(d.end, 10) || 1, d.kind || 'spell'),
+    })],
+    ['POST', '/api/pdfs/:id/extract/reply', async ({ id }, q, d) => claude.extractFromReply(id, d.kind || 'spell', d.reply || '')],
+    ['POST', '/api/pdfs/:id/extract', async ({ id }, q, d) => claude.extract(await claudeConfig(), id,
+      parseInt(d.start, 10) || 1, parseInt(d.end, 10) || 1, d.kind || 'spell')],
+
+    // ---------------------------------------------------------- drafting with Claude
+    ['POST', '/api/claude/draft', async (p, q, d) => claude.draft(await claudeConfig(), requireConcept(d), level(d.level),
+      await tags(q), newCharacter)],
+    ['POST', '/api/claude/chat/draft-prompt', async (p, q, d) => ({
+      prompt: await claude.draftPrompt1(requireConcept(d), level(d.level), await tags(q)),
+    })],
+    ['POST', '/api/claude/chat/draft-reply-1', async (p, q, d) => claude.draftReply1((d.concept || '').trim(), d.reply || '',
+      await tags(q), newCharacter)],
+    ['POST', '/api/claude/chat/draft-reply-2', async (p, q, d) => claude.draftReply2(d.character || {}, d.reply || '',
+      d.warnings, d.summary || '')],
   ].map(([method, pattern, fn]) => {
     const keys = [];
     const re = new RegExp('^' + pattern.replace(/:(\w+)/g, (m, k) => { keys.push(k); return '([^/]+)'; }) + '$');
     return { method, re, keys, fn };
   });
 
-  /** fetch()-like entry point: request(path, {method, json}) -> data, or throws ApiError. */
+  /** fetch()-like entry point: request(path, {method, json, files}) -> data, or throws ApiError. */
   async function request(url, opts = {}) {
-    const method = (opts.method || (opts.json !== undefined ? 'POST' : 'GET')).toUpperCase();
+    const method = (opts.method || (opts.json !== undefined || opts.files ? 'POST' : 'GET')).toUpperCase();
     const [path, qs = ''] = url.split('?');
     for (const r of routes) {
       if (r.method !== method) continue;
       const m = path.match(r.re);
       if (!m) continue;
       const params = Object.fromEntries(r.keys.map((k, i) => [k, decodeURIComponent(m[i + 1])]));
-      const data = await r.fn(params, new URLSearchParams(qs), opts.json || {});
+      const data = await r.fn(params, new URLSearchParams(qs), opts.json || {}, opts.files || null);
       return structuredClone(data);
     }
     throw new ApiError(`This version of the app can’t do that yet (${method} ${path}).`, 404);
   }
 
-  return { request, library: lib };
+  return { request, library: lib, pdfs };
 }
