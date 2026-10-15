@@ -3,6 +3,7 @@
 
 export const ABILITIES = ["str", "dex", "con", "int", "wis", "cha"];
 export const ABILITY_NAMES = {"str": "Strength", "dex": "Dexterity", "con": "Constitution", "int": "Intelligence", "wis": "Wisdom", "cha": "Charisma"};
+export const NAME_TO_ABILITY = Object.fromEntries(Object.entries(ABILITY_NAMES).map(([k, v]) => [v.toLowerCase(), k]));
 export const SKILLS = {"Acrobatics": "dex", "Animal Handling": "wis", "Arcana": "int", "Athletics": "str", "Deception": "cha", "History": "int", "Insight": "wis", "Intimidation": "cha", "Investigation": "int", "Medicine": "wis", "Nature": "int", "Perception": "wis", "Performance": "cha", "Persuasion": "cha", "Religion": "int", "Sleight of Hand": "dex", "Stealth": "dex", "Survival": "wis"};
 export const POINT_BUY_COST = {"8": 0, "9": 1, "10": 2, "11": 3, "12": 4, "13": 5, "14": 7, "15": 9};
 export const POINT_BUY_BUDGET = 27;

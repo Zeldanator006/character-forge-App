@@ -4,14 +4,19 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Character Forge</title>
-  <meta name="description" content="Build 5th edition characters offline: species, class, skills, spells and a finished sheet.">
+  <meta name="description" content="Build 5th edition characters offline and play them at the table: species, class, spells, gear and a finished sheet.">
   <meta name="theme-color" content="#2347a0">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="Char Forge">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="ui/style.css">
+  <link rel="stylesheet" href="phone.css">
+  <script>
+    try { var c = localStorage.getItem('cb-theme-css'); if (c) { var s = document.createElement('style'); s.id = 'theme'; s.textContent = c; document.head.appendChild(s); } } catch (e) {}
+  </script>
 </head>
 <body>
   <header class="top">
@@ -22,9 +27,26 @@
       <button data-act="go" data-view="pdfs">PDFs</button>
       <button data-act="go" data-view="settings">Settings</button>
     </nav>
+    <button class="btn quiet theme-toggle" id="theme-toggle" data-act="toggle-dark" aria-label="Switch to dark mode">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 10.2A6 6 0 0 1 5.8 2.5a6 6 0 1 0 7.7 7.7z" fill="currentColor"/></svg>
+      <span>Dark</span></button>
   </header>
   <main id="main"><p class="loading">Loading…</p></main>
   <noscript><p style="padding:20px">Character Forge needs JavaScript turned on.</p></noscript>
-  <script type="module" src="app.js"></script>
+  <script src="js/boot.js"></script>
+  <script src="ui/theme.js"></script>
+  <script src="ui/dice.js"></script>
+  <script src="ui/app.js"></script>
+  <script src="ui/gear.js"></script>
+  <script src="ui/options.js"></script>
+  <script src="ui/feats.js"></script>
+  <script src="ui/story.js"></script>
+  <script src="ui/play.js"></script>
+  <script src="ui/companions.js"></script>
+  <script src="ui/levelup.js"></script>
+  <script src="ui/phone.js"></script>
+  <script src="ui/offline.js"></script>
+  <script src="js/phone-ui.js"></script>
+  <script type="module" src="js/start.js"></script>
 </body>
 </html>

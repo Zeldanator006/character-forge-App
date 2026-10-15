@@ -1,0 +1,20 @@
+/* The phone app's additions to the PC app's stylesheet (ui/style.css). */
+.brand { display: flex; align-items: center; gap: 8px; }
+.brand img { border-radius: 6px; flex: none; }
+
+/* things that need the PC: the wiki, phones on the Wi-Fi, table copies, the fillable sheet */
+[data-act="sync"], [data-act="refresh-entry"], [data-act="magic-sync"], [data-act="download-all"], #phone-lib,
+[data-act="phone-open"], [data-act="official-pdf"], [data-act="hand-copy"] { display: none !important; }
+
+/* phones with notches and home bars, when installed as an app */
+@supports (padding: env(safe-area-inset-top)) {
+  .top { padding-top: max(10px, env(safe-area-inset-top)); padding-left: max(24px, env(safe-area-inset-left)); padding-right: max(24px, env(safe-area-inset-right)); }
+  main { padding-bottom: max(24px, env(safe-area-inset-bottom)); }
+}
+@media (max-width: 760px) {
+  .top { position: static; flex-direction: row; align-items: center; gap: 6px; padding: 8px 12px; }
+  .brand small { display: none; }
+}
+@media (max-width: 480px) {
+  .brand-name { display: none; }   /* the icon stands in for the name so all four tabs fit */
+}

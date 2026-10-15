@@ -8,7 +8,7 @@ const sw = readFileSync(new URL('sw.js', www), 'utf8');
 const cached = new Set([...sw.matchAll(/'([\w./-]+)'/g)].map((m) => m[1]));
 
 test('the service worker caches every script, data file and vendored library', () => {
-  const want = ['index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'data/srd-2014.json',
+  const want = ['index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'data/srd-2014.json', 'data/creatures.json',
     ...readdirSync(new URL('js/', www)).map((f) => `js/${f}`),
     ...readdirSync(new URL('vendor/', www)).filter((f) => f.endsWith('.mjs')).map((f) => `vendor/${f}`),
     ...readdirSync(new URL('icons/', www)).map((f) => `icons/${f}`)];
