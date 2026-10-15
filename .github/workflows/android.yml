@@ -1,0 +1,34 @@
+# Build the Android app (a test APK anyone can install, plus the bundle Google Play takes) on every push.
+# The APK and AAB appear under the run's "Artifacts". Store uploads need a signed AAB: see README, "Publishing".
+name: Android app
+
+on:
+  push:
+    branches: [main, play-tab]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - run: npm test
+      - run: npx cap sync android
+      - name: Build
+        working-directory: android
+        run: ./gradlew --no-daemon assembleDebug bundleRelease
+      - uses: actions/upload-artifact@v4
+        with:
+          name: character-forge-android
+          path: |
+            android/app/build/outputs/apk/debug/*.apk
+            android/app/build/outputs/bundle/release/*.aab

@@ -1,0 +1,10 @@
+{
+  "appId": "io.github.zeldanator006.characterforge",
+  "appName": "Character Forge",
+  "webDir": "www",
+  "android": { "allowMixedContent": false },
+  "ios": { "contentInset": "always" },
+  "plugins": {
+    "CapacitorHttp": { "enabled": false }
+  }
+}
