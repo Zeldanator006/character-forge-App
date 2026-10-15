@@ -3,6 +3,10 @@
    files saved to the device instead of downloaded from a server, and nothing that needs the PC (the wiki,
    phones on the Wi-Fi, the fillable sheet). Everything else is the PC app's code as it is. */
 
+/* In the store app the wiki can be read (native HTTP); show its buttons there */
+if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorHttp
+  && (!window.Capacitor.isNativePlatform || window.Capacitor.isNativePlatform())) document.body.classList.add('wiki-ok');
+
 const fileName = (n) => (n || 'character').replace(/[^\w\- ]+/g, '').trim() || 'character';
 
 /** Save a file to the device: the share sheet where there is one (phones), a download otherwise. */
@@ -75,6 +79,10 @@ renderSettings = async function renderSettings() {   // eslint-disable-line no-f
       ${status.library.imported ? '<button class="btn quiet danger" data-act="clear-imported">Remove imported entries</button>' : ''}</div>
     <label class="check" style="margin-top:10px"><input type="checkbox" id="show-ua" data-change="phone-tags" ${c.show_unearthed_arcana ? 'checked' : ''}>Show Unearthed Arcana (playtest) options in the builder</label><br>
     <label class="check"><input type="checkbox" id="show-hb" data-change="phone-tags" ${c.show_homebrew ? 'checked' : ''}>Show homebrew options in the builder</label></div>
+  ${c.wiki_available ? `<div class="panel" style="margin-bottom:16px"><h2>Wiki</h2>
+    <p class="hint">Pages from dnd5e.wikidot.com are downloaded the first time you open them and kept on this device, so later visits are instant and work offline. ${status.library.pages_cached} pages saved so far.</p>
+    <div class="row"><button class="btn primary" data-act="sync">${(status.library.kinds.class || {}).wiki ? 'Refresh wiki index' : 'Load wiki index'}</button></div>
+    <label class="field" style="max-width:300px;margin-top:10px"><span>Seconds between page downloads</span><input type="number" id="delay" min="0.5" step="0.5" value="${c.wiki_delay_seconds}" style="width:100px" data-change="phone-delay"></label></div>` : ''}
   <div class="panel" style="margin-bottom:16px"><h2>Your data</h2>
     <p class="hint">Characters and entries you add are saved on this device only. Back them up to keep them safe or to move them to another device.</p>
     ${persisted === false ? '<p class="note">This browser may clear saved data if the device runs low on space. Installing the app (Add to Home screen) or making regular backups keeps your characters safe.</p>' : ''}
@@ -128,6 +136,10 @@ renderSettings = async function renderSettings() {   // eslint-disable-line no-f
 };
 
 Object.assign(CHANGES, {
+  'phone-delay': async (t) => {
+    await api('/api/settings', { json: { wiki_delay_seconds: Math.max(0.5, +t.value || 1) } });
+    toast('Saved.');
+  },
   'phone-tags': async () => {
     await api('/api/settings', { json: { show_unearthed_arcana: $('#show-ua').checked, show_homebrew: $('#show-hb').checked } });
     S.lists = {}; S.details = {};

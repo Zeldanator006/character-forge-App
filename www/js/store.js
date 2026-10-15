@@ -4,8 +4,10 @@
    - idbStore(): IndexedDB in the browser (and inside the Android/iOS app wrapper)
    - memoryStore(): plain objects, for tests */
 
-const TABLES = ['characters', 'entries', 'settings', 'pdfs', 'pdf_files'];
-const VERSION = 2;  // 1: characters, entries, settings; 2: added pdfs, pdf_files
+const TABLES = ['characters', 'entries', 'settings', 'pdfs', 'pdf_files', 'wiki_pages'];
+// tables whose rows carry their own id (a name or a path) instead of a number counted up
+const KEYED = new Set(['settings', 'wiki_pages']);
+const VERSION = 3;  // 1: characters, entries, settings; 2: added pdfs, pdf_files; 3: added wiki_pages
 
 export function memoryStore() {
   const data = Object.fromEntries(TABLES.map((t) => [t, new Map()]));
@@ -22,6 +24,7 @@ export function memoryStore() {
       return v.id;
     },
     async delete(table, id) { data[table].delete(id); },
+    async count(table) { return data[table].size; },
     async putMany(table, values) { for (const v of values) await this.put(table, v); },
     async deleteMany(table, ids) { for (const id of ids) data[table].delete(id); },
   };
@@ -35,7 +38,7 @@ export function idbStore(name = 'character-forge') {
       const db = req.result;
       for (const t of TABLES) {
         if (!db.objectStoreNames.contains(t)) {
-          db.createObjectStore(t, t === 'settings' ? { keyPath: 'id' } : { keyPath: 'id', autoIncrement: true });
+          db.createObjectStore(t, KEYED.has(t) ? { keyPath: 'id' } : { keyPath: 'id', autoIncrement: true });
         }
       }
     };
@@ -61,6 +64,7 @@ export function idbStore(name = 'character-forge') {
       return run(table, 'readwrite', (s) => s.put(v));
     },
     delete: (table, id) => run(table, 'readwrite', (s) => s.delete(id)),
+    count: (table) => run(table, 'readonly', (s) => s.count()),
     // one transaction for a whole import: thousands of separate ones would take minutes on a phone
     putMany: (table, values) => run(table, 'readwrite', (s) => {
       for (const value of values) {

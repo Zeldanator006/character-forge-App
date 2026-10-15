@@ -1,6 +1,6 @@
 /* Offline support: keeps the app's own files on the device so it opens without a connection.
    Bump VERSION whenever a file below changes, so devices fetch the new copies. */
-const VERSION = 'v9';
+const VERSION = 'v10';
 const CACHE = `character-forge-${VERSION}`;
 const FILES = [
   './', 'index.html', 'phone.css', 'manifest.webmanifest',
@@ -9,9 +9,9 @@ const FILES = [
   'ui/phone.js', 'ui/play.js', 'ui/story.js', 'ui/style.css', 'ui/theme.js',
   'js/api.js', 'js/boot.js', 'js/claude.js', 'js/creatures.js', 'js/dice.js', 'js/feats.js', 'js/gear.js', 'js/levelup.js',
   'js/library.js', 'js/options.js', 'js/pdfs.js', 'js/phone-ui.js', 'js/py.js', 'js/resources.js', 'js/rules.js', 'js/srd.js',
-  'js/start.js', 'js/store.js',
-  'vendor/anthropic-sdk.mjs', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs',
-  'data/srd-2014.json', 'data/creatures.json',
+  'js/start.js', 'js/store.js', 'js/wiki.js', 'js/wikiparse.js',
+  'vendor/anthropic-sdk.mjs', 'vendor/pdf-lib.mjs', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs',
+  'data/srd-2014.json', 'data/creatures.json', 'data/field_map.json',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png', 'icons/apple-touch-icon.png',
 ];
 

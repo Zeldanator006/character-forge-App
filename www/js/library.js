@@ -1,124 +1,16 @@
 /* The library: built-in SRD content plus entries you add, behind one interface.
-   Ported from the PC app's library.py and the trait reader in wikiparse.py. */
-import { ABILITY_NAMES, CLASS_RULES, SKILLS } from './srd.js';
+   Ported from the PC app's library.py. */
+import { CLASS_RULES } from './srd.js';
 import { slugify } from './rules.js';
 import * as classOpts from './options.js';
+import { analyzeTraits } from './wikiparse.js';
+import * as wikiparse from './wikiparse.js';
+import { WikiError } from './wiki.js';
 
-const NAME_TO_ABILITY = Object.fromEntries(Object.entries(ABILITY_NAMES).map(([k, v]) => [v.toLowerCase(), k]));
-const ALL_SKILLS = Object.keys(SKILLS);
-const NUM_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, a: 1, an: 1 };
 const HIDDEN_TAGS = ['ua', 'homebrew'];
 const BUILT_IN = new Set(['srd', 'wiki']);
-const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-const splitList = (s) => (s || '').replace(/\band\b|\bor\b/g, ',').split(',')
-  .map((p) => p.replace(/^[ .;]+|[ .;]+$/g, '')).filter(Boolean);
-const skillsIn = (s) => {
-  const low = (s || '').toLowerCase();
-  return ALL_SKILLS.filter((sk) => new RegExp(`\\b${reEsc(sk.toLowerCase())}\\b`).test(low));
-};
-
-const CHOICE_RE = /(?:proficiency (?:in|with)|proficient in)\s+(?:your choice of\s+)?(one|two|three|four|a|an)\s+(of the following\s+)?(?:other\s+)?skills?\b([^.]*)/i;
-
-/** 'proficiency with two of the following skills of your choice: A, B, C' -> {count, options};
-    options is null when any skill may be chosen. */
-export function skillChoice(text) {
-  const m = (text || '').match(CHOICE_RE);
-  if (!m) return null;
-  const count = NUM_WORDS[m[1].toLowerCase()] || 1;
-  const rest = m[3];
-  if (!m[2] && !rest.toLowerCase().includes('of your choice') && !rest.includes(':')) return null;
-  const options = m[2] || rest.includes(':') ? skillsIn(rest) : [];
-  return { count, options: options.length ? options : null };
-}
-
-/** A background's 'Skill Proficiencies' line -> [fixed skills, choices]. */
-export function skillField(text) {
-  text = text || '';
-  const m = text.match(/\b(choose|one of|two of|plus one|and one|from among|of your choice)\b/i);
-  if (!m) return [skillsIn(text), []];
-  const before = text.slice(0, m.index), after = text.slice(m.index);
-  const n = after.match(/\b(one|two|three|four)\b/i);
-  const count = n ? NUM_WORDS[n[1].toLowerCase()] || 1 : 1;
-  const options = skillsIn(after);
-  return [skillsIn(before), [{ count, options: options.length ? options : null, trait: 'Background' }]];
-}
-
-/** The 'of your choice' part of an Ability Score Increase trait, as picks: [[{count, amount, exclude}], alt or null]. */
-export function asiChoices(low, fixed) {
-  let picks = [], alt = null;
-  let m = low.match(/increase one (?:ability )?score by (\d),? and (?:increase )?a different (?:ability )?score by (\d)(?:,? or increase (one|two|three) different (?:ability )?scores by (\d))?/);
-  if (m) {
-    picks = [{ count: 1, amount: parseInt(m[1], 10), exclude: [] }, { count: 1, amount: parseInt(m[2], 10), exclude: [] }];
-    if (m[3]) alt = [{ count: NUM_WORDS[m[3]] || 3, amount: parseInt(m[4], 10), exclude: [] }];
-    return [picks, alt];
-  }
-  const re = /\b(one|two|three|four|a)\b ((?:other |different )*)(?:ability )?scores?(?: of your choice)?,? (?:each )?(?:increases?|increase) by (\d)/g;
-  for (m of low.matchAll(re)) {
-    if (!m[0].includes('of your choice') && !m[2].includes('different') && !m[2].includes('other')) continue;
-    const n = m[1] === 'a' ? 1 : NUM_WORDS[m[1]] || 1;
-    picks.push({ count: n, amount: parseInt(m[3], 10), exclude: m[2].includes('other') ? Object.keys(fixed).sort() : [] });
-  }
-  return [picks, alt];
-}
-
-/** Pull numbers out of species traits: ability increases, speed, size, senses, skills. */
-export function analyzeTraits(traits) {
-  const out = { asi: {}, asi_note: '', asi_flexible: false, asi_choice: [], asi_alt: null, speed: null, size: '',
-    darkvision: null, languages: '', skills: [], skill_choices: 0, bonus_feat: false, hp_per_level: 0,
-    weapon_profs: [], armor_profs: [], choices: [] };
-  for (const t of traits) {
-    const name = t.name.toLowerCase(), body = t.text || '';
-    const low = body.toLowerCase();
-    if (name.includes('ability score')) {
-      out.asi_note = `${out.asi_note} ${body}`.trim();
-      if (/ability scores each increase by 1/.test(low)) {
-        for (const code of Object.keys(ABILITY_NAMES)) out.asi[code] = (out.asi[code] || 0) + 1;
-      }
-      for (const m of body.matchAll(/(Strength|Dexterity|Constitution|Intelligence|Wisdom|Charisma) score(?:s)? (?:increases|increase|each increase) by (\d)/g)) {
-        const code = NAME_TO_ABILITY[m[1].toLowerCase()];
-        out.asi[code] = (out.asi[code] || 0) + parseInt(m[2], 10);
-      }
-      if (/of your choice|one score by 2|different score|two different|three different/.test(low)) {
-        out.asi_flexible = true;
-        const [picks, alt] = asiChoices(low, out.asi);
-        out.asi_choice.push(...picks);
-        out.asi_alt = alt || out.asi_alt;
-      }
-    } else if (name === 'speed' || low.slice(0, 120).includes('walking speed')) {
-      const m = low.match(/walking speed (?:is|of) (\d+)/);
-      if (m && out.speed === null) out.speed = parseInt(m[1], 10);
-    }
-    if (name === 'size') {
-      const m = low.match(/your size is (tiny|small|medium|large)/);
-      const m2 = /you are (small or medium|medium or small)/.test(low);
-      out.size = m ? m[1][0].toUpperCase() + m[1].slice(1) : (m2 ? 'Small or Medium' : '');
-    }
-    if (name.includes('darkvision')) {
-      const m = low.match(/within (\d+) feet/);
-      if (m) out.darkvision = parseInt(m[1], 10);
-    }
-    if (name === 'languages') out.languages = body.split('.')[0].replace(/^you can speak, read, and write\s+/i, '');
-    if (name === 'feat' || low.includes('feat of your choice')) out.bonus_feat = true;
-    if (/hit point maximum increases by 1,? and it increases by 1 every time you gain a level/.test(low)) out.hp_per_level += 1;
-    for (const m of body.matchAll(/(?:proficiency in|proficient in) (?:the )?([A-Za-z ,]+?) skills?\b/g)) {
-      for (const sk of skillsIn(m[1])) if (!out.skills.includes(sk)) out.skills.push(sk);
-    }
-    const choice = skillChoice(body);
-    if (choice) {
-      choice.trait = t.name;
-      out.choices.push(choice);
-      out.skill_choices += choice.count;
-    }
-    let m = low.match(/proficiency with (?:the )?([a-z ,']+?)(?:\.|$)/);
-    if (m && !m[1].includes('armor') && !m[1].includes('tools') && !m[1].includes('artisan')) {
-      out.weapon_profs.push(...splitList(m[1]).map((w) => w.trim()).filter(Boolean));
-    }
-    m = low.match(/proficiency with (light|medium|heavy)(?: and (light|medium|heavy))? armor/);
-    if (m) out.armor_profs.push(...[m[1], m[2]].filter(Boolean));
-  }
-  return out;
-}
+export { analyzeTraits, skillChoice, skillField, asiChoices } from './wikiparse.js';
 
 export function classSlug(entry) {
   const d = entry.data || {};
@@ -320,6 +212,171 @@ export class Library {
     return { pages_cached: 0, kinds };
   }
 
+  /* ---------------------------------------------------------- reading the wiki (the store app only) */
+  /** wiki: from wiki.js makeWiki(). Without one, or in a plain browser, entries are only what's built in or imported. */
+  attachWiki(wiki) { this.wiki = wiki; }
+
+  wikiAvailable() { return Boolean(this.wiki && this.wiki.available()); }
+
+  /** Add or update entries the way the PC's db.upsert_entry does: the same kind, source, path and name is the same
+      entry; new data is merged into the old, and an entry once parsed stays parsed. One write for the lot. */
+  async upsertMany(rows) {
+    const key = (e) => `${e.kind}|${e.source}|${e.path || ''}|${e.name}`;
+    const stored = new Map(this.all.filter((e) => !this.builtIn.includes(e)).map((e) => [key(e), e]));
+    const out = new Map();
+    for (const r of rows) {
+      const k = key(r);
+      const old = out.get(k) || stored.get(k);
+      const tags = [...new Set(r.tags || [])].sort();
+      if (old) {
+        const { _words, ...base } = old;
+        out.set(k, { ...base, parent: r.parent || '', group: r.group || '', tags,
+          ...(r.data != null ? { data: { ...(old.data || {}), ...r.data }, parsed: Boolean(r.parsed || old.parsed) } : {}) });
+      } else {
+        out.set(k, { kind: r.kind, name: r.name, source: r.source, path: r.path || '', parent: r.parent || '', group: r.group || '',
+          tags, data: r.data || {}, parsed: Boolean(r.parsed) });
+      }
+    }
+    await this.store.putMany('entries', [...out.values()]);
+    await this.load();
+  }
+
+  findStored(kind, source, path, name = null) {
+    return this.all.find((e) => e.kind === kind && e.source === source && e.path === path && (name == null || e.name === name)) || null;
+  }
+
+  /** Download the wiki front page and lineage list, then record every linked entry. */
+  async syncIndex() {
+    const found = [], errors = [];
+    for (const path of ['/', '/lineage']) {
+      try {
+        found.push(...wikiparse.parseIndex(await this.wiki.fetch(path, true)));
+      } catch (e) {
+        if (!(e instanceof WikiError)) throw e;
+        errors.push(e.message);
+      }
+    }
+    const counts = {}, rows = [];
+    for (const e of found) {
+      const name = e.kind === 'spell-list' ? `${e.parent[0].toUpperCase()}${e.parent.slice(1).toLowerCase()} spell list` : e.name;
+      rows.push({ kind: e.kind, name, source: 'wiki', path: e.path, parent: e.parent || '', group: e.group || '', tags: e.tags || [],
+        data: e.variant_of ? { variant_of: e.variant_of } : null });
+      counts[e.kind] = (counts[e.kind] || 0) + 1;
+    }
+    await this.upsertMany(rows);
+    // make sure the core classes and their spell lists exist even if the front page changes
+    const more = [];
+    for (const [slug, rules] of Object.entries(CLASS_RULES)) {
+      if (!this.all.some((e) => e.kind === 'class' && e.source === 'wiki' && e.name.toLowerCase() === rules.name.toLowerCase())) {
+        more.push({ kind: 'class', name: rules.name, source: 'wiki', path: `/${slug}` });
+      }
+      if (rules.caster !== 'none' && !this.all.some((e) => e.kind === 'spell-list' && e.source === 'wiki' && e.parent === slug)) {
+        more.push({ kind: 'spell-list', name: `${rules.name} spell list`, source: 'wiki', path: `/spells:${slug}`, parent: slug });
+      }
+    }
+    if (more.length) await this.upsertMany(more);
+    return { counts, errors };
+  }
+
+  /** An entry with full details: a wiki entry's page is downloaded and read the first time (or when the parser has
+      changed, or on refresh). Without the wiki, entries come back as they are. */
+  async ensureDetail(id, refresh = false) {
+    const entry = this.get(id);
+    if (!entry || entry.source !== 'wiki' || !this.wikiAvailable()) return entry;
+    if (entry.parsed && !refresh && (entry.data || {})._v === wikiparse.PARSER_VERSION) return entry;
+    const kind = entry.kind;
+    const html = await this.wiki.fetch(entry.path, refresh);
+    const base = { kind, name: entry.name, source: 'wiki', path: entry.path, parent: entry.parent, group: entry.group, tags: entry.tags, parsed: true };
+    if (kind === 'class') {
+      const slug = classSlug(entry);
+      const data = { ...wikiparse.parseClass(html, slug), slug, _v: wikiparse.PARSER_VERSION };
+      const rows = [{ ...base, data }];
+      for (const sub of data.subclasses || []) {
+        if (!this.findStored('subclass', 'wiki', sub.path)) {
+          rows.push({ kind: 'subclass', name: sub.name, source: 'wiki', path: sub.path, parent: slug, group: sub.source || '', tags: sub.tags || [] });
+        }
+      }
+      await this.upsertMany(rows);
+    } else if (kind === 'spell-list') {
+      const spells = wikiparse.parseSpellList(html);
+      if (!spells.length) {
+        await this.wiki.forget(entry.path);
+        throw new WikiError(`Couldn't find any spells on the wiki's ${entry.name} page. Try downloading it again.`);
+      }
+      const rows = spells.map((sp) => ({ kind: 'spell', name: sp.name, source: 'wiki', path: sp.path, tags: sp.tags,
+        data: Object.fromEntries(['level', 'school', 'casting_time', 'ritual', 'range', 'duration', 'components'].map((k) => [k, sp[k]])) }));
+      rows.push({ ...base, data: { spells: spells.map((sp) => ({ path: sp.path, name: sp.name, level: sp.level })), _v: wikiparse.PARSER_VERSION } });
+      await this.upsertMany(rows);
+    } else {
+      const parser = wikiparse.PARSERS[kind] || wikiparse.parseGeneric;
+      const { name: _n, ...data } = parser(html);
+      if (kind === 'background' && (entry.data || {}).variant_of) data.variant_note = `Variant of the background on ${entry.data.variant_of}`;
+      data._v = wikiparse.PARSER_VERSION;
+      await this.upsertMany([{ ...base, data }]);
+    }
+    return this.findStored(kind, 'wiki', entry.path, entry.name) || this.get(id);
+  }
+
+  /** Make sure everything a character points at has been read (before working out the sheet). */
+  async ensureFor(char) {
+    if (!this.wikiAvailable()) return;
+    const ids = [(char.race || {}).id, (char.background || {}).id, ...(char.feats || []).map((f) => f.id)];
+    for (const c of char.classes || []) ids.push(c.id, (c.subclass || {}).id);
+    for (const id of ids) if (id) await this.ensureDetail(id).catch(() => null);
+  }
+
+  /** Read a class's spell list from the wiki first if it hasn't been (adding the entry if the index lacked it). */
+  async ensureSpellList(slug, refresh = false) {
+    if (!this.wikiAvailable()) return;
+    slug = THIRD_CASTER_LISTS[slug] || slug;
+    let list = this.all.find((e) => e.kind === 'spell-list' && e.parent === slug && e.source === 'wiki');
+    if (!list && CLASS_RULES[slug] && CLASS_RULES[slug].caster !== 'none') {
+      await this.upsertMany([{ kind: 'spell-list', name: `${CLASS_RULES[slug].name} spell list`, source: 'wiki', path: `/spells:${slug}`, parent: slug }]);
+      list = this.all.find((e) => e.kind === 'spell-list' && e.parent === slug && e.source === 'wiki');
+    }
+    if (list) await this.ensureDetail(list.id, refresh);
+  }
+
+  /** Read whatever class option pages a character's option groups need (Eldritch Invocations, maneuvers...). */
+  async prepareClassOptions(char) {
+    if (!this.wikiAvailable()) return;
+    await this.ensureFor(char);
+    for (const [, spec] of classOpts.featLists(char, this.buildContext(char))) {
+      if (spec && spec.page && !this.all.some((e) => e.kind === 'class-option' && e.path === spec.page)) {
+        await this.upsertMany([{ kind: 'class-option', name: spec.label, source: 'wiki', path: spec.page, parent: spec.class, group: 'Quick Links' }]);
+      } else if (spec && spec.feature) {
+        const ce = this.find('class', (CLASS_RULES[spec.class] || {}).name || spec.class);
+        if (ce) await this.ensureDetail(ce.id).catch(() => null);
+      }
+    }
+    for (const g of this.classOptionGroups(char, ['ua', 'homebrew'])) {
+      if (g.entry_id != null) await this.ensureDetail(g.entry_id).catch(() => null);
+    }
+  }
+
+  /** Load the wiki's full spell list once, so any spell can be searched and added. */
+  async ensureAllSpells() {
+    if (this.allSpellsDone || !this.wikiAvailable()) return;
+    let html;
+    try { html = await this.wiki.fetch('/spells'); } catch (e) { if (e instanceof WikiError) return; throw e; }
+    const spells = wikiparse.parseSpellList(html);
+    await this.upsertMany(spells.map((sp) => {
+      const row = Object.fromEntries(['level', 'school', 'casting_time', 'ritual', 'range', 'duration', 'components'].map((k) => [k, sp[k]]));
+      if (row.level == null) delete row.level;
+      return { kind: 'spell', name: sp.name, source: 'wiki', path: sp.path, tags: sp.tags, data: row };
+    }));
+    this.allSpellsDone = spells.length > 0;
+  }
+
+  /** Read the wiki's magic item list (one request) and record every item; pages are read when used. */
+  async syncMagicItems() {
+    const items = wikiparse.parseMagicItemList(await this.wiki.fetch('/wondrous-items', true));
+    if (!items.length) throw new WikiError('Couldn’t find any magic items on the wiki’s list. Try again later.');
+    await this.upsertMany(items.map((it) => ({ kind: 'item', name: it.name, source: 'wiki', path: it.path, group: it.rarity, tags: it.tags,
+      data: { rarity: it.rarity, item_type: it.item_type, attunement: it.attunement, book: it.source } })));
+    return { count: items.length };
+  }
+
   async add(entry) {
     const e = { kind: entry.kind, name: entry.name, source: entry.source || 'custom', path: entry.path || '',
       parent: entry.parent || '', group: entry.group || '', tags: entry.tags || [], data: entry.data || {}, parsed: true };
@@ -339,8 +396,9 @@ export class Library {
   classSpells(slug, includeTags = [], maxLevel = 9) {
     slug = THIRD_CASTER_LISTS[slug] || slug;
     const spells = [];
-    const lists = this.entries.filter((e) => e.kind === 'spell-list' && e.parent === slug && BUILT_IN.has(e.source));
-    const list = lists.find((e) => e.source === 'wiki') || lists[0];
+    // the wiki's list once it has been read (imported or downloaded), the SRD's until then
+    const lists = this.all.filter((e) => e.kind === 'spell-list' && e.parent === slug && BUILT_IN.has(e.source));
+    const list = lists.find((e) => e.source === 'wiki' && ((e.data || {}).spells || []).length) || lists.find((e) => e.source === 'srd') || lists[0];
     for (const s of (list && list.data.spells) || []) {
       const e = this.byPath.get(`spell:${s.path}`);
       if (e) spells.push(e);

@@ -9,6 +9,7 @@ import { Pdfs } from './pdfs.js';
 import { DEFAULT_MODEL, MODELS, makeClaude } from './claude.js';
 import * as creatures from './creatures.js';
 import { spellEffect } from './dice.js';
+import { makeWiki, NOT_IN_BROWSER } from './wiki.js';
 
 export class ApiError extends Error {
   /** data: extra fields sent back with the error (a refused save returns the newer character). */
@@ -73,14 +74,14 @@ function cleanTheme(theme) {
 }
 
 const SETTINGS_DEFAULTS = { show_unearthed_arcana: false, show_homebrew: false, anthropic_api_key: '', model: DEFAULT_MODEL,
-  theme: THEME_DEFAULT };
+  theme: THEME_DEFAULT, wiki_delay_seconds: 1.0 };
 const now = () => Date.now() / 1000;
 const summaryOf = (c) => {
   const classes = (c.data.classes || []).map((k) => `${k.name || '?'} ${k.level || 1}`).join(', ');
   return [((c.data.race || {}).name) || '', classes].filter(Boolean).join(' · ');
 };
 
-export async function createApi(store, srdDoc, { extractPdf, creaturesDoc } = {}) {
+export async function createApi(store, srdDoc, { extractPdf, creaturesDoc, wikiTransport } = {}) {
   // stat blocks for companions and Wild Shape (SRD 5.1); tests hand them in, the app fetches them
   if (creaturesDoc) creatures.setCreatures(creaturesDoc);
   else await creatures.loadCreatures();
@@ -90,6 +91,9 @@ export async function createApi(store, srdDoc, { extractPdf, creaturesDoc } = {}
   const claude = makeClaude({ lib, pdfs });
 
   const settings = async () => ({ ...SETTINGS_DEFAULTS, ...(((await store.get('settings', 'app')) || {}).value || {}) });
+  // the wiki: only inside the store app (or with a test transport); everywhere else the library is built in or imported
+  lib.attachWiki(makeWiki({ store, delaySeconds: async () => (await settings()).wiki_delay_seconds, transport: wikiTransport || null }));
+  const needWiki = () => { if (!lib.wikiAvailable()) throw new ApiError(NOT_IN_BROWSER); };
   /** Settings safe to show in the interface: never the key itself. */
   const publicSettings = (s) => {
     const { anthropic_api_key: key, ...rest } = s;
@@ -142,7 +146,8 @@ export async function createApi(store, srdDoc, { extractPdf, creaturesDoc } = {}
   // [method, pattern, handler(params, query, body)]
   const routes = [
     ['GET', '/api/status', async () => ({
-      config: publicSettings(await settings()), library: { ...lib.status(), imported: lib.importedCount() }, pdfs: (await store.all('pdfs')).length, template: null,
+      config: { ...publicSettings(await settings()), wiki_available: lib.wikiAvailable() },
+      library: { ...lib.status(), pages_cached: await lib.wiki.cachedCount(), imported: lib.importedCount() }, pdfs: (await store.all('pdfs')).length, template: null,
     })],
     ['POST', '/api/settings', async (p, q, body) => {
       const s = await settings();
@@ -151,6 +156,7 @@ export async function createApi(store, srdDoc, { extractPdf, creaturesDoc } = {}
       if (body.clear_api_key) s.anthropic_api_key = '';
       if (body.model && MODELS.includes(body.model)) s.model = body.model;
       if (isObj(body.theme)) s.theme = cleanTheme(body.theme);
+      if ('wiki_delay_seconds' in body) s.wiki_delay_seconds = Math.max(0.5, Number(body.wiki_delay_seconds) || 1);
       await store.put('settings', { id: 'app', value: s });
       return { config: publicSettings(s) };
     }],
@@ -167,12 +173,19 @@ export async function createApi(store, srdDoc, { extractPdf, creaturesDoc } = {}
       classes: Object.fromEntries(Object.entries(CLASS_RULES).map(([k, v]) => [k, { name: v.name, subclass_level: v.subclass_level, caster: v.caster }])),
     })],
 
-    ['GET', '/api/entries', async (p, q) => ({
+    ['POST', '/api/wiki/sync', async () => { needWiki(); return lib.syncIndex(); }],
+    // the PC's "download every page, then export for the phone" panel; the phone is where the library goes, so idle
+    ['GET', '/api/wiki/download-all', async () => ({ status: { running: false, done: 0, total: 0, current: '', errors: [], error_count: 0, finished: null } })],
+    ['POST', '/api/wiki/magic-items', async () => { needWiki(); return lib.syncMagicItems(); }],
+    ['GET', '/api/entries', async (p, q) => {
+      if (q.get('kind') === 'spell') await lib.ensureAllSpells().catch(() => {});   // never block the list on the wiki
+      return {
       entries: lib.list({ kind: q.get('kind') || null, parent: q.get('parent') || null, query: q.get('q') || '',
         includeTags: await tags(q), limit: Number(q.get('limit') || 2000) }),
-    })],
-    ['GET', '/api/entries/:id', async ({ id }) => {
-      const found = lib.get(id);
+      };
+    }],
+    ['GET', '/api/entries/:id', async ({ id }, q) => {
+      const found = await lib.ensureDetail(id, q.get('refresh') === '1');
       if (!found) throw new ApiError('Not found', 404);
       const { _words, ...e } = structuredClone({ ...found, _words: undefined });
       if (e.kind === 'race') {
@@ -182,7 +195,7 @@ export async function createApi(store, srdDoc, { extractPdf, creaturesDoc } = {}
       return { entry: e };
     }],
     ['GET', '/api/race/:id/selection', async ({ id }, q) => ({
-      selection: raceSelection(lib.get(id), q.get('variant') || null, q.get('subrace') || null),
+      selection: raceSelection(await lib.ensureDetail(id), q.get('variant') || null, q.get('subrace') || null),
     })],
     ['POST', '/api/entries', async (p, q, d) => {
       if (!d.name || !d.kind) throw new ApiError('kind and name are required');
@@ -191,16 +204,23 @@ export async function createApi(store, srdDoc, { extractPdf, creaturesDoc } = {}
     ['DELETE', '/api/entries/:id', async ({ id }) => { await lib.remove(id); return { ok: true }; }],
     ['POST', '/api/library/import', async (p, q, doc) => lib.importLibrary(doc)],
     ['POST', '/api/library/clear-imported', async () => ({ removed: await lib.clearImported() })],
-    ['GET', '/api/classes/:slug/spells', async ({ slug }, q) => ({
-      spells: lib.classSpells(slug, await tags(q), Number(q.get('max') ?? 9)),
-    })],
-    ['GET', '/api/spells', async (p, q) => ({ spells: lib.allSpells(await tags(q), Number(q.get('max') ?? 9)) })],
+    ['GET', '/api/classes/:slug/spells', async ({ slug }, q) => {
+      await lib.ensureSpellList(slug, q.get('refresh') === '1');
+      return { spells: lib.classSpells(slug, await tags(q), Number(q.get('max') ?? 9)) };
+    }],
+    ['GET', '/api/spells', async (p, q) => {
+      await lib.ensureAllSpells().catch(() => {});
+      return { spells: lib.allSpells(await tags(q), Number(q.get('max') ?? 9)) };
+    }],
     ['GET', '/api/spell-effect/:id', async ({ id }, q) => {
-      const e = lib.get(id);
+      const e = await lib.ensureDetail(id);
       if (!e || e.kind !== 'spell') throw new ApiError('Not a spell', 404);
       return { effect: spellEffect(e.data, parseInt(q.get('level') || '1', 10) || 1) };
     }],
-    ['POST', '/api/class-options', async (p, q, d) => ({ groups: lib.classOptionGroups(d.character || {}, await tags(q)) })],
+    ['POST', '/api/class-options', async (p, q, d) => {
+      await lib.prepareClassOptions(d.character || {});
+      return { groups: lib.classOptionGroups(d.character || {}, await tags(q)) };
+    }],
     ['GET', '/api/magic-items', async (p, q) => ({ items: lib.magicItems(await tags(q)) })],
     ['POST', '/api/creatures/search', async (p, q, d) => ({
       creatures: creatures.search(d.q || '', d.mode in creatures.MODES ? d.mode : 'any', d.info || {}),
@@ -246,6 +266,7 @@ export async function createApi(store, srdDoc, { extractPdf, creaturesDoc } = {}
     ['GET', '/api/characters/:id/export', async ({ id }) => ({ character: await getChar(id) })],
     ['POST', '/api/compute', async (p, q, body) => {
       const char = body.character || {};
+      await lib.ensureFor(char);
       return { sheet: computeAny(char, lib.buildContext(char)) };
     }],
     ['POST', '/api/characters/:id/hand-written-copy', async ({ id }) => {
@@ -270,19 +291,25 @@ export async function createApi(store, srdDoc, { extractPdf, creaturesDoc } = {}
     ['POST', '/api/levelup/preview', async (p, q, d) => {
       const char = d.character || {};
       if (char.mode === 'manual') throw new ApiError('Hand-written sheets level up in the dialog without a preview.');
+      await lib.ensureFor(char);
+      if ((d.choice || {}).class_id) await lib.ensureDetail(d.choice.class_id);
       return { preview: levelup.preview(char, d.choice || {}, lib) };
     }],
-    ['POST', '/api/levelup/apply', async (p, q, d) => ({ character: levelup.apply(d.character || {}, d.choice || {}, d.data || {}, lib) })],
+    ['POST', '/api/levelup/apply', async (p, q, d) => {
+      await lib.ensureFor(d.character || {});
+      if ((d.choice || {}).class_id) await lib.ensureDetail(d.choice.class_id);
+      return { character: levelup.apply(d.character || {}, d.choice || {}, d.data || {}, lib) };
+    }],
     ['GET', '/api/starting-gear', async (p, q) => {
       const out = { class_name: '', class: [], wealth: null, background_name: '', background: [], background_text: '' };
-      const ce = q.get('class_id') ? lib.get(q.get('class_id')) : null;
+      const ce = q.get('class_id') ? await lib.ensureDetail(q.get('class_id')) : null;
       if (ce) {
         const slug = classSlug(ce);
         out.class_name = ce.name;
         out.class = gear.startingEquipment(slug, ce.data.equipment || []);
         if (gear.STARTING_WEALTH[slug]) { const [dice, mult] = gear.STARTING_WEALTH[slug]; out.wealth = { dice, mult }; }
       }
-      const be = q.get('background_id') ? lib.get(q.get('background_id')) : null;
+      const be = q.get('background_id') ? await lib.ensureDetail(q.get('background_id')) : null;
       if (be) {
         const text = be.data.equipment || '';
         Object.assign(out, { background_name: be.name, background_text: text, background: gear.backgroundItems(text) });
@@ -290,7 +317,7 @@ export async function createApi(store, srdDoc, { extractPdf, creaturesDoc } = {}
       return out;
     }],
     ['POST', '/api/gear/from-entry', async (p, q, d) => {
-      const e = lib.get(d.id || 0);
+      const e = await lib.ensureDetail(d.id || 0);
       if (!e) throw new ApiError('Not found', 404);
       const v = /^\d+$/.test(String(d.variant ?? '')) ? parseInt(d.variant, 10) : null;
       return { item: gear.itemFromEntry(e, v) };

@@ -2,9 +2,10 @@
 .brand { display: flex; align-items: center; gap: 8px; }
 .brand img { border-radius: 6px; flex: none; }
 
-/* things that need the PC: the wiki, phones on the Wi-Fi, table copies, the fillable sheet */
-[data-act="sync"], [data-act="refresh-entry"], [data-act="magic-sync"], [data-act="download-all"], #phone-lib,
-[data-act="phone-open"], [data-act="official-pdf"] { display: none !important; }
+/* things that need the PC: phones on the Wi-Fi, table copies, the fillable sheet; and the wiki, which only the
+   store app can read (phone-ui.js marks the page wiki-ok there) */
+body:not(.wiki-ok) [data-act="sync"], body:not(.wiki-ok) [data-act="refresh-entry"], body:not(.wiki-ok) [data-act="magic-sync"],
+[data-act="download-all"], #phone-lib, [data-act="phone-open"], [data-act="official-pdf"] { display: none !important; }
 
 /* phones with notches and home bars, when installed as an app */
 @supports (padding: env(safe-area-inset-top)) {
