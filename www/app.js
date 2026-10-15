@@ -833,6 +833,11 @@ async function renderSettings() {
       <label class="field"><span>Model</span><select id="model">${c.models.map((m) => `<option ${m === c.model ? 'selected' : ''}>${m}</option>`).join('')}</select></label></div>
     <div class="row"><button class="btn primary" data-act="save-claude">Save</button>${c.api_key_set ? '<button class="btn quiet danger" data-act="clear-key">Remove saved key</button>' : ''}</div>
     <p class="hint small" style="margin-top:8px">The key is saved on this device only and sent only to Anthropic. Anyone who can open the app on this device can use it, so remove it before lending the device out.</p></div>
+  <div class="panel" style="margin-bottom:16px"><h2>Library from your PC</h2>
+    <p class="hint">The built-in library is the free SRD content. To use everything from your PC app’s library (wiki pages, PDFs, your own entries), open DND Char Builder on the PC, go to Library, download all wiki pages, then export the library and open that file here. It stays on this device and is for your own use; don’t share it.</p>
+    ${status.library.imported ? `<p class="note good">${status.library.imported} entries imported from your PC. Where an imported entry has the same name as an SRD one, the imported one is used.</p>` : ''}
+    <div class="row"><label class="btn primary" style="cursor:pointer">Import library<input type="file" accept=".json,application/json" id="import-lib" hidden></label>
+      ${status.library.imported ? '<button class="btn quiet danger" data-act="clear-imported">Remove imported entries</button>' : ''}</div></div>
   <div class="panel" style="margin-bottom:16px"><h2>Your data</h2>
     <p class="hint">Characters and entries you add are saved on this device only. Back them up to keep them safe or to move them to another device.</p>
     ${persisted === false ? '<p class="note">This browser may clear saved data if the device runs low on space. Installing the app (Add to Home screen) or making regular backups keeps your characters safe.</p>' : ''}
@@ -846,6 +851,18 @@ async function renderSettings() {
       The SRD 5.1 is licensed under the Creative Commons Attribution 4.0 International License available at
       <a href="https://creativecommons.org/licenses/by/4.0/legalcode" target="_blank" rel="noopener">creativecommons.org/licenses/by/4.0/legalcode</a>.</p>
     <p class="hint small">Character Forge is unofficial and not affiliated with or endorsed by Wizards of the Coast.</p></div>`;
+  $('#import-lib').addEventListener('change', async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    toast('Importing…');
+    try {
+      const r = await api('/api/library/import', { json: JSON.parse(await f.text()) });
+      S.lists = {}; S.details = {};
+      toast(`Imported ${r.added + r.updated} entries${r.updated ? ` (${r.updated} updated)` : ''}.`);
+      renderSettings();
+    } catch (err) { toast('Couldn’t import: ' + (err instanceof SyntaxError ? 'that isn’t a library file.' : err.message), 'error'); }
+    e.target.value = '';
+  });
   $('#restore-file').addEventListener('change', async (e) => {
     const f = e.target.files[0];
     if (!f) return;
@@ -1142,6 +1159,12 @@ const ACTIONS = {
     await api('/api/settings', { json: { anthropic_api_key: $('#api-key').value, model: $('#model').value } });
     toast('Saved.'); renderSettings();
   }),
+  'clear-imported': async () => {
+    if (!confirm('Remove every entry imported from your PC? Characters that use them will show warnings until you import again.')) return;
+    const { removed } = await api('/api/library/clear-imported', { method: 'POST' });
+    S.lists = {}; S.details = {};
+    toast(`Removed ${removed} entries.`); renderSettings();
+  },
   'clear-key': async () => { await api('/api/settings', { json: { clear_api_key: true } }); renderSettings(); },
   'open-pdf': async (t, e) => {
     e.preventDefault();

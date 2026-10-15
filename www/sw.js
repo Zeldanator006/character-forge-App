@@ -1,6 +1,6 @@
 /* Offline support: keeps the app's own files on the device so it opens without a connection.
    Bump VERSION whenever a file below changes, so devices fetch the new copies. */
-const VERSION = 'v5';
+const VERSION = 'v6';
 const CACHE = `character-forge-${VERSION}`;
 const FILES = [
   './', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest',

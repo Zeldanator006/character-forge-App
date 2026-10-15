@@ -22,6 +22,8 @@ export function memoryStore() {
       return v.id;
     },
     async delete(table, id) { data[table].delete(id); },
+    async putMany(table, values) { for (const v of values) await this.put(table, v); },
+    async deleteMany(table, ids) { for (const id of ids) data[table].delete(id); },
   };
 }
 
@@ -59,5 +61,14 @@ export function idbStore(name = 'character-forge') {
       return run(table, 'readwrite', (s) => s.put(v));
     },
     delete: (table, id) => run(table, 'readwrite', (s) => s.delete(id)),
+    // one transaction for a whole import: thousands of separate ones would take minutes on a phone
+    putMany: (table, values) => run(table, 'readwrite', (s) => {
+      for (const value of values) {
+        const v = { ...value };
+        if (v.id == null) delete v.id;
+        s.put(v);
+      }
+    }),
+    deleteMany: (table, ids) => run(table, 'readwrite', (s) => { for (const id of ids) s.delete(id); }),
   };
 }

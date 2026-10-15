@@ -80,7 +80,7 @@ export async function createApi(store, srdDoc, { extractPdf } = {}) {
   // [method, pattern, handler(params, query, body)]
   const routes = [
     ['GET', '/api/status', async () => ({
-      config: publicSettings(await settings()), library: lib.status(), pdfs: (await store.all('pdfs')).length, template: null,
+      config: publicSettings(await settings()), library: { ...lib.status(), imported: lib.importedCount() }, pdfs: (await store.all('pdfs')).length, template: null,
     })],
     ['POST', '/api/settings', async (p, q, body) => {
       const s = await settings();
@@ -121,6 +121,8 @@ export async function createApi(store, srdDoc, { extractPdf } = {}) {
       return { id: await lib.add({ ...d, source: d.source || 'custom' }) };
     }],
     ['DELETE', '/api/entries/:id', async ({ id }) => { await lib.remove(id); return { ok: true }; }],
+    ['POST', '/api/library/import', async (p, q, doc) => lib.importLibrary(doc)],
+    ['POST', '/api/library/clear-imported', async () => ({ removed: await lib.clearImported() })],
     ['GET', '/api/classes/:slug/spells', async ({ slug }, q) => ({
       spells: lib.classSpells(slug, await tags(q), Number(q.get('max') ?? 9)),
     })],

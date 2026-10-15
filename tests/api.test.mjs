@@ -116,3 +116,39 @@ test('search lists name matches before entries that only mention the words', asy
   assert.equal(names[0], 'Fireball');
   assert.ok(names.length > 1);
 });
+
+test('a library exported from the PC imports, replaces SRD duplicates, re-imports in place and can be removed', async () => {
+  const { request } = await fresh();
+  const wizardSrd = (await request('/api/entries?kind=class')).entries.find((e) => e.name === 'Wizard');
+  const doc = {
+    app: 'character-forge-library', version: 1,
+    entries: [
+      { kind: 'class', name: 'Wizard', source: 'wiki', path: '/wizard', parent: '', group: '', tags: [],
+        data: { slug: 'wizard', hit_die: 6, features: [{ name: 'Arcane Recovery', level: 1, text: 'From the wiki.' }] } },
+      { kind: 'subclass', name: 'School of Illusion', source: 'wiki', path: '/wizard:illusion', parent: 'wizard', group: '', tags: [], data: {} },
+      { kind: 'spell-list', name: 'Wizard Spells', source: 'wiki', path: '/spells:wizard', parent: 'wizard', group: '', tags: [],
+        data: { spells: [{ path: '/spell:minor-illusion', name: 'Minor Illusion', level: 0 }] } },
+      { kind: 'spell', name: 'Minor Illusion', source: 'wiki', path: '/spell:minor-illusion', parent: '', group: '', tags: [],
+        data: { level: 0, school: 'Illusion', classes: ['Wizard'] } },
+    ],
+  };
+  const r = await request('/api/library/import', { json: doc });
+  assert.deepEqual([r.added, r.updated], [4, 0]);
+  const wizards = (await request('/api/entries?kind=class')).entries.filter((e) => e.name === 'Wizard');
+  assert.equal(wizards.length, 1);
+  assert.equal(wizards[0].source, 'wiki');
+  assert.equal((await request(`/api/entries/${wizardSrd.id}`)).entry.source, 'srd');   // old characters still resolve
+  const subs = (await request('/api/classes/wizard/subclasses')).entries.map((s) => s.name);
+  assert.ok(subs.includes('School of Illusion') && subs.includes('Evocation'), subs.join());
+  const spells = (await request('/api/classes/wizard/spells?max=0')).spells.map((s) => s.name);
+  assert.deepEqual(spells, ['Minor Illusion']);
+  assert.equal((await request('/api/status')).library.imported, 4);
+
+  const again = await request('/api/library/import', { json: doc });
+  assert.deepEqual([again.added, again.updated], [0, 4]);
+  assert.equal((await request('/api/status')).library.imported, 4);
+
+  await assert.rejects(request('/api/library/import', { json: { app: 'character-forge', entries: [] } }), /library export/);
+  assert.equal((await request('/api/library/clear-imported', { method: 'POST' })).removed, 4);
+  assert.equal((await request('/api/entries?kind=class')).entries.find((e) => e.name === 'Wizard').source, 'srd');
+});

@@ -153,6 +153,8 @@ const byRelevance = (q) => {
   return (a, b) => (rank(a) - rank(b)) || nocase(a, b);
 };
 const summary = ({ _words, data, ...e }) => e;
+const dupKey = (e) => `${e.kind}|${(e.parent || '').toLowerCase()}|${(e.name || '').toLowerCase()}`;
+const importKey = (e) => `${e.kind}|${e.source}|${e.path}|${e.parent}|${e.name}`;
 export const THIRD_CASTER_LISTS = { fighter: 'wizard', rogue: 'wizard' };  // Eldritch Knight, Arcane Trickster
 
 /* ---------------------------------------------------------------- the library */
@@ -165,11 +167,51 @@ export class Library {
   }
 
   async load() {
-    const mine = await this.store.all('entries');
-    this.entries = [...this.builtIn, ...mine.map((e) => ({ ...e, source: e.source || 'custom' }))];
-    this.byId = new Map(this.entries.map((e) => [e.id, e]));
-    this.byPath = new Map(this.entries.filter((e) => BUILT_IN.has(e.source)).map((e) => [`${e.kind}:${e.path}`, e]));
+    const mine = (await this.store.all('entries')).map((e) => ({ ...e, source: e.source || 'custom' }));
+    // An imported wiki entry replaces the SRD one with the same name: the SRD copy stays reachable by id (characters
+    // made before the import still point at it) but drops out of lists, searches and lookups.
+    const wiki = new Set(mine.filter((e) => e.source === 'wiki').map(dupKey));
+    this.all = [...this.builtIn, ...mine];
+    this.entries = this.all.filter((e) => !(e.source === 'srd' && wiki.has(dupKey(e))));
+    this.byId = new Map(this.all.map((e) => [e.id, e]));
+    // wiki last, so where both have the same page path the wiki entry wins
+    this.byPath = new Map([...this.entries.filter((e) => e.source === 'srd'), ...this.entries.filter((e) => e.source === 'wiki')]
+      .map((e) => [`${e.kind}:${e.path}`, e]));
   }
+
+  /** Bring in a library exported from the PC app (DND Char Builder → Library → Export library for the phone app).
+      Entries already imported are updated in place, so importing a newer export again is safe. */
+  async importLibrary(doc) {
+    if (!doc || doc.app !== 'character-forge-library' || !Array.isArray(doc.entries)) {
+      throw Object.assign(new Error('That file isn’t a library export from the PC app.'), { status: 400 });
+    }
+    const existing = new Map((await this.store.all('entries')).filter((e) => e.imported).map((e) => [importKey(e), e.id]));
+    const rows = [];
+    for (const en of doc.entries) {
+      if (!en || !en.kind || !en.name) continue;
+      const e = { kind: String(en.kind), name: String(en.name), source: en.source || 'wiki', path: en.path || '',
+        parent: en.parent || '', group: en.group || '', tags: Array.isArray(en.tags) ? en.tags : [],
+        data: en.data && typeof en.data === 'object' ? en.data : {}, parsed: true, imported: true };
+      const id = existing.get(importKey(e));
+      if (id != null) e.id = id;
+      rows.push(e);
+    }
+    await this.store.putMany('entries', rows);
+    await this.load();
+    const kinds = {};
+    for (const e of rows) kinds[e.kind] = (kinds[e.kind] || 0) + 1;
+    return { added: rows.length - rows.filter((e) => e.id != null).length, updated: rows.filter((e) => e.id != null).length, kinds };
+  }
+
+  /** Remove everything that came from a PC library import (your own entries stay). */
+  async clearImported() {
+    const ids = (await this.store.all('entries')).filter((e) => e.imported).map((e) => e.id);
+    await this.store.deleteMany('entries', ids);
+    await this.load();
+    return ids.length;
+  }
+
+  importedCount() { return this.all.filter((e) => e.imported).length; }
 
   get(id) { return this.byId.get(Number(id)) || null; }
 
@@ -211,7 +253,7 @@ export class Library {
   async remove(id) {
     const e = this.get(id);
     if (!e) throw Object.assign(new Error('Not found'), { status: 404 });
-    if (BUILT_IN.has(e.source)) throw Object.assign(new Error('Built-in entries can’t be deleted.'), { status: 400 });
+    if (BUILT_IN.has(e.source) && !e.imported) throw Object.assign(new Error('Built-in entries can’t be deleted.'), { status: 400 });
     await this.store.delete('entries', e.id);
     await this.load();
   }
@@ -219,7 +261,8 @@ export class Library {
   classSpells(slug, includeTags = [], maxLevel = 9) {
     slug = THIRD_CASTER_LISTS[slug] || slug;
     const spells = [];
-    const list = this.entries.find((e) => e.kind === 'spell-list' && e.parent === slug && BUILT_IN.has(e.source));
+    const lists = this.entries.filter((e) => e.kind === 'spell-list' && e.parent === slug && BUILT_IN.has(e.source));
+    const list = lists.find((e) => e.source === 'wiki') || lists[0];
     for (const s of (list && list.data.spells) || []) {
       const e = this.byPath.get(`spell:${s.path}`);
       if (e) spells.push(e);
