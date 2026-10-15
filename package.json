@@ -12,6 +12,8 @@
   "devDependencies": {
     "@anthropic-ai/sdk": "0.129.0",
     "esbuild": "0.28.2",
+    "linkedom": "0.18.13",
+    "pdf-lib": "1.17.1",
     "pdfjs-dist": "6.3.289"
   }
 }

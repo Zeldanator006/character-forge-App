@@ -4,7 +4,7 @@
 
 /* things that need the PC: the wiki, phones on the Wi-Fi, table copies, the fillable sheet */
 [data-act="sync"], [data-act="refresh-entry"], [data-act="magic-sync"], [data-act="download-all"], #phone-lib,
-[data-act="phone-open"], [data-act="official-pdf"], [data-act="hand-copy"] { display: none !important; }
+[data-act="phone-open"], [data-act="official-pdf"] { display: none !important; }
 
 /* phones with notches and home bars, when installed as an app */
 @supports (padding: env(safe-area-inset-top)) {
