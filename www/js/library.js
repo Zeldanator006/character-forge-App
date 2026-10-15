@@ -2,6 +2,7 @@
    Ported from the PC app's library.py and the trait reader in wikiparse.py. */
 import { ABILITY_NAMES, CLASS_RULES, SKILLS } from './srd.js';
 import { slugify } from './rules.js';
+import * as classOpts from './options.js';
 
 const NAME_TO_ABILITY = Object.fromEntries(Object.entries(ABILITY_NAMES).map(([k, v]) => [v.toLowerCase(), k]));
 const ALL_SKILLS = Object.keys(SKILLS);
@@ -17,10 +18,55 @@ const skillsIn = (s) => {
   return ALL_SKILLS.filter((sk) => new RegExp(`\\b${reEsc(sk.toLowerCase())}\\b`).test(low));
 };
 
+const CHOICE_RE = /(?:proficiency (?:in|with)|proficient in)\s+(?:your choice of\s+)?(one|two|three|four|a|an)\s+(of the following\s+)?(?:other\s+)?skills?\b([^.]*)/i;
+
+/** 'proficiency with two of the following skills of your choice: A, B, C' -> {count, options};
+    options is null when any skill may be chosen. */
+export function skillChoice(text) {
+  const m = (text || '').match(CHOICE_RE);
+  if (!m) return null;
+  const count = NUM_WORDS[m[1].toLowerCase()] || 1;
+  const rest = m[3];
+  if (!m[2] && !rest.toLowerCase().includes('of your choice') && !rest.includes(':')) return null;
+  const options = m[2] || rest.includes(':') ? skillsIn(rest) : [];
+  return { count, options: options.length ? options : null };
+}
+
+/** A background's 'Skill Proficiencies' line -> [fixed skills, choices]. */
+export function skillField(text) {
+  text = text || '';
+  const m = text.match(/\b(choose|one of|two of|plus one|and one|from among|of your choice)\b/i);
+  if (!m) return [skillsIn(text), []];
+  const before = text.slice(0, m.index), after = text.slice(m.index);
+  const n = after.match(/\b(one|two|three|four)\b/i);
+  const count = n ? NUM_WORDS[n[1].toLowerCase()] || 1 : 1;
+  const options = skillsIn(after);
+  return [skillsIn(before), [{ count, options: options.length ? options : null, trait: 'Background' }]];
+}
+
+/** The 'of your choice' part of an Ability Score Increase trait, as picks: [[{count, amount, exclude}], alt or null]. */
+export function asiChoices(low, fixed) {
+  let picks = [], alt = null;
+  let m = low.match(/increase one (?:ability )?score by (\d),? and (?:increase )?a different (?:ability )?score by (\d)(?:,? or increase (one|two|three) different (?:ability )?scores by (\d))?/);
+  if (m) {
+    picks = [{ count: 1, amount: parseInt(m[1], 10), exclude: [] }, { count: 1, amount: parseInt(m[2], 10), exclude: [] }];
+    if (m[3]) alt = [{ count: NUM_WORDS[m[3]] || 3, amount: parseInt(m[4], 10), exclude: [] }];
+    return [picks, alt];
+  }
+  const re = /\b(one|two|three|four|a)\b ((?:other |different )*)(?:ability )?scores?(?: of your choice)?,? (?:each )?(?:increases?|increase) by (\d)/g;
+  for (m of low.matchAll(re)) {
+    if (!m[0].includes('of your choice') && !m[2].includes('different') && !m[2].includes('other')) continue;
+    const n = m[1] === 'a' ? 1 : NUM_WORDS[m[1]] || 1;
+    picks.push({ count: n, amount: parseInt(m[3], 10), exclude: m[2].includes('other') ? Object.keys(fixed).sort() : [] });
+  }
+  return [picks, alt];
+}
+
 /** Pull numbers out of species traits: ability increases, speed, size, senses, skills. */
 export function analyzeTraits(traits) {
-  const out = { asi: {}, asi_note: '', asi_flexible: false, speed: null, size: '', darkvision: null, languages: '',
-    skills: [], skill_choices: 0, bonus_feat: false, hp_per_level: 0, weapon_profs: [], armor_profs: [] };
+  const out = { asi: {}, asi_note: '', asi_flexible: false, asi_choice: [], asi_alt: null, speed: null, size: '',
+    darkvision: null, languages: '', skills: [], skill_choices: 0, bonus_feat: false, hp_per_level: 0,
+    weapon_profs: [], armor_profs: [], choices: [] };
   for (const t of traits) {
     const name = t.name.toLowerCase(), body = t.text || '';
     const low = body.toLowerCase();
@@ -33,7 +79,12 @@ export function analyzeTraits(traits) {
         const code = NAME_TO_ABILITY[m[1].toLowerCase()];
         out.asi[code] = (out.asi[code] || 0) + parseInt(m[2], 10);
       }
-      if (/of your choice|one score by 2|different score|two different|three different/.test(low)) out.asi_flexible = true;
+      if (/of your choice|one score by 2|different score|two different|three different/.test(low)) {
+        out.asi_flexible = true;
+        const [picks, alt] = asiChoices(low, out.asi);
+        out.asi_choice.push(...picks);
+        out.asi_alt = alt || out.asi_alt;
+      }
     } else if (name === 'speed' || low.slice(0, 120).includes('walking speed')) {
       const m = low.match(/walking speed (?:is|of) (\d+)/);
       if (m && out.speed === null) out.speed = parseInt(m[1], 10);
@@ -50,12 +101,16 @@ export function analyzeTraits(traits) {
     if (name === 'languages') out.languages = body.split('.')[0].replace(/^you can speak, read, and write\s+/i, '');
     if (name === 'feat' || low.includes('feat of your choice')) out.bonus_feat = true;
     if (/hit point maximum increases by 1,? and it increases by 1 every time you gain a level/.test(low)) out.hp_per_level += 1;
-    for (const m of body.matchAll(/proficiency in (?:the )?([A-Za-z ,]+?) skills?\b/g)) {
+    for (const m of body.matchAll(/(?:proficiency in|proficient in) (?:the )?([A-Za-z ,]+?) skills?\b/g)) {
       for (const sk of skillsIn(m[1])) if (!out.skills.includes(sk)) out.skills.push(sk);
     }
-    let m = low.match(/proficiency in (\w+) (?:other )?skills? of your choice/);
-    if (m) out.skill_choices += NUM_WORDS[m[1]] || 0;
-    m = low.match(/proficiency with (?:the )?([a-z ,']+?)(?:\.|$)/);
+    const choice = skillChoice(body);
+    if (choice) {
+      choice.trait = t.name;
+      out.choices.push(choice);
+      out.skill_choices += choice.count;
+    }
+    let m = low.match(/proficiency with (?:the )?([a-z ,']+?)(?:\.|$)/);
     if (m && !m[1].includes('armor') && !m[1].includes('tools') && !m[1].includes('artisan')) {
       out.weapon_profs.push(...splitList(m[1]).map((w) => w.trim()).filter(Boolean));
     }
@@ -90,14 +145,37 @@ export function classRules(entry) {
   return rules;
 }
 
+/** A subrace's Ability Score Increase normally adds to the species' one. It replaces it when it says so, when it's
+    all "of your choice" (variant human), or when it's a whole set by itself, +2 and +1. */
+function subraceReplacesAsi(subTraits) {
+  for (const t of subTraits) {
+    if (!t.name.toLowerCase().includes('ability score')) continue;
+    const low = (t.text || '').toLowerCase();
+    if (low.includes('replace') || low.includes('instead of')) return true;
+    if (low.includes('of your choice') && !/(strength|dexterity|constitution|intelligence|wisdom|charisma) score/.test(low)) return true;
+    if (Object.values(analyzeTraits([t]).asi).reduce((a, b) => a + b, 0) >= 3) return true;
+  }
+  return false;
+}
+
 export function raceSelection(entry, variantName = null, subraceName = null) {
   const variants = ((entry || {}).data || {}).variants || [];
   if (!variants.length) return { name: entry ? entry.name : '', traits: [], analysis: analyzeTraits([]) };
   const variant = variants.find((v) => v.source === variantName) || variants[0];
-  const traits = [...(variant.traits || [])];
+  let traits = [...(variant.traits || [])];
   const sub = (variant.subraces || []).find((s) => s.name === subraceName) || null;
-  if (sub) traits.push(...(sub.traits || []));
+  let replaced = null;
+  if (sub) {
+    const subTraits = sub.traits || [];
+    if (subraceReplacesAsi(subTraits)) {
+      // the subrace's own ability score increase takes the place of the base one
+      replaced = traits.find((t) => t.name.toLowerCase().includes('ability score')) || null;
+      traits = traits.filter((t) => t !== replaced);
+    }
+    traits.push(...subTraits);
+  }
   const analysis = analyzeTraits(traits);
+  if (replaced) analysis.asi_replaced = replaced.text;
   const fixed = variant.fixed;
   if (fixed) {  // SRD and PDF entries carry explicit numbers; trust those over reading the text
     const asi = { ...(fixed.asi || {}) };
@@ -280,6 +358,75 @@ export class Library {
       .map((s) => ({ id: s.id, name: s.name, source: s.source, tags: s.tags || [],
         ...Object.fromEntries(['level', 'school', 'casting_time', 'ritual', 'range', 'duration', 'components'].map((k) => [k, s.data[k] ?? null])) }))
       .sort((a, b) => ((a.level ?? 99) - (b.level ?? 99)) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  }
+
+  /** Every set of class options this character can pick from right now, with the options filled in.
+      Option pages come from a library imported from the PC (the phone can't read the wiki itself). */
+  classOptionGroups(char, includeTags = []) {
+    const ctx = this.buildContext(char);
+    const groups = classOpts.featureGroups(char, ctx);
+    const classes = (char.classes || []).filter((c) => c.name);
+    classes.forEach((c, i) => {
+      const cc = ctx.classes[i] || {};
+      const slug = classOpts.classSlug(c);
+      const lvl = Math.max(1, Math.min(20, parseInt(c.level, 10) || 1));
+      for (const e of this.list({ kind: 'class-option', parent: slug, includeTags: [...includeTags, 'homebrew'] })) {
+        const path = e.path.split('#')[0];
+        if (!classOpts.pageApplies(path, c)) continue;
+        const count = classOpts.pageCount(path, slug, lvl, cc.detail, e.name);
+        if (count === 0) continue;
+        groups.push({ key: `${slug}|${path}`, class: slug, class_name: c.name, class_level: lvl, label: e.name, count,
+          source: 'page', entry_id: e.id, options: [], error: '' });
+      }
+    });
+    for (const [g, spec] of classOpts.featLists(char, ctx)) {
+      if (spec && spec.page) {
+        const e = this.entries.find((x) => x.kind === 'class-option' && x.path === spec.page);
+        if (e) Object.assign(g, { source: 'feat-page', entry_id: e.id });
+        else g.error = `The ${spec.label} options aren’t in this device’s library. Import your library from the PC to get them.`;
+      } else if (spec && spec.feature) {
+        const ce = this.find('class', (CLASS_RULES[spec.class] || {}).name || spec.class[0].toUpperCase() + spec.class.slice(1));
+        const feat = ((ce && ce.data.features) || []).find((f) => (f.name || '').toLowerCase() === spec.feature.toLowerCase());
+        g.options = ((feat && feat.options) || []).map((o) => ({ ...o }));
+        if (!g.options.length) g.error = `Couldn't find the ${spec.label} options in the ${spec.class} class.`;
+      }
+      groups.push(g);
+    }
+    const hidden = HIDDEN_TAGS.filter((t) => !includeTags.includes(t));
+    for (const g of groups) {
+      if (!['page', 'feat-page'].includes(g.source) || g.entry_id == null) continue;
+      const opts = ((this.get(g.entry_id) || {}).data || {}).options || [];
+      g.options = opts.filter((o) => !(o.tags || []).some((t) => hidden.includes(t)));
+      if (!opts.length) g.error = `The ${g.label} page has no options in this device’s library. Import your library from the PC again after opening it there.`;
+    }
+    return classOpts.markUnmet(groups, char);
+  }
+
+  /** Every magic item in the library (imported from the PC, your PDFs' and your own), for the equipment list. */
+  magicItems(includeTags = []) {
+    const hidden = HIDDEN_TAGS.filter((t) => !includeTags.includes(t));
+    return this.entries.filter((e) => e.kind === 'item' && !(e.tags || []).some((t) => hidden.includes(t))).sort(nocase)
+      .map((e) => {
+        const d = e.data || {};
+        return { id: e.id, name: e.name, source: e.source, rarity: d.rarity || e.group || '', item_type: d.item_type || '',
+          attunement: Boolean(d.attunement), book: d.book || d.source || '', tags: e.tags || [] };
+      });
+  }
+
+  /** Every spell the library knows, for feats that let you pick from any list (Fey Touched, Shadow Touched). */
+  allSpells(includeTags = [], maxLevel = 9) {
+    const hidden = HIDDEN_TAGS.filter((t) => !includeTags.includes(t));
+    const seen = new Set(), out = [];
+    const rows = this.entries.filter((e) => e.kind === 'spell')
+      .sort((a, b) => ((b.source === 'wiki') - (a.source === 'wiki')) || nocase(a, b));
+    for (const e of rows) {
+      const lvl = e.data.level;
+      if (lvl == null || lvl > maxLevel || (e.tags || []).some((t) => hidden.includes(t)) || seen.has(e.name.toLowerCase())) continue;
+      seen.add(e.name.toLowerCase());
+      out.push({ id: e.id, name: e.name, source: e.source, tags: e.tags || [],
+        ...Object.fromEntries(['level', 'school', 'casting_time', 'ritual', 'range', 'duration', 'components'].map((k) => [k, e.data[k] ?? null])) });
+    }
+    return out.sort((a, b) => (a.level - b.level) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   }
 
   subclassesFor(slug, includeTags = []) {

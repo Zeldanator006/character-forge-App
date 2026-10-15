@@ -280,10 +280,81 @@ def build(folder):
     return entries
 
 
+# ---------------------------------------------------------------- feature choices
+# The PC app reads choices like Fighting Style or Metamagic from the wiki's bold lists (wikiparse.feature_options
+# and choice_count). The SRD writes the same choices as "Name. Text" paragraphs; this gives them the same shape.
+CHOICE_WORDS = re.compile(r"\bchoose\b|of your choice|one of the following|the following options|following features", re.I)
+NUM = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
+OPTION_PARA = re.compile(r"^([A-Z][\w'’-]*(?: (?:of|the|a|to|and|[A-Z][\w'’-]*))*)\. (.+)", re.S)
+
+
+def _num_word(w):
+    return NUM.get(str(w).lower()) or (int(w) if str(w).isdigit() else None)
+
+
+def _first_level(t):
+    m = re.search(r"\b(\d{1,2})(?:st|nd|rd|th) level", t)
+    return int(m.group(1)) if m else None
+
+
+def choice_count(text, level=None):
+    """Same as the PC app's wikiparse.choice_count: ({level: total} or {} if unknown)."""
+    t = re.sub(r"\s+", " ", text or "")
+    m = re.search(r"\b(one|two|three|four|five|\d)\b (?:[\w' -]{0,40}? )?(?:of the following|of your choice)", t, re.I)
+    base = _num_word(m.group(1)) if m else None
+    if base is None:
+        return {}
+    start = level or _first_level(t) or 1
+    steps = {start: base}
+    for n, lvls in re.findall(r"\b(another|one|two|three) (?:additional |more |other )?[\w' -]{0,30}?(?:of your choice )?at ((?:\d+(?:st|nd|rd|th)(?: level)?(?:,? (?:and )?)?)+)", t, re.I):
+        add = 1 if n.lower() == "another" else (_num_word(n) or 1)
+        for lv in re.findall(r"(\d+)(?:st|nd|rd|th)", lvls):
+            if int(lv) > start:
+                steps[int(lv)] = steps.get(int(lv), 0) + add
+    total, out = 0, {}
+    for lv in sorted(steps):
+        total += steps[lv]
+        out[lv] = total
+    return out
+
+
+def feature_options(text):
+    """'Archery. You gain...' paragraphs after the first one -> [{name, source, text}] (two or more, or none).
+    A paragraph that doesn't start that way belongs to the option before it."""
+    opts = []
+    for para in text.split("\n\n")[1:]:
+        m = OPTION_PARA.match(para.strip())
+        if m and len(m.group(1)) <= 40:
+            opts.append({"name": m.group(1), "source": "SRD", "text": m.group(2).strip()})
+        elif opts:
+            opts[-1]["text"] += "\n\n" + para.strip()
+    return opts if len(opts) >= 2 else []
+
+
+def add_feature_options(entries):
+    for e in entries:
+        if e["kind"] not in ("class", "subclass"):
+            continue
+        for f in e["data"].get("features") or []:
+            body = f.get("text") or ""
+            if not CHOICE_WORDS.search(body.split("\n\n")[0] + " " + " ".join(body.split("\n\n")[1:2])):
+                continue
+            opts = feature_options(body)
+            if opts:
+                f["options"] = opts
+                f["choose"] = choice_count(body, f.get("level"))
+    return entries
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--options-only":   # add the choices to an existing srd-2014.json
+        doc = json.loads(OUT.read_text(encoding="utf-8"))
+        add_feature_options(doc["entries"])
+        OUT.write_text(json.dumps(doc, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        return
     if len(sys.argv) != 2:
         sys.exit(__doc__)
-    entries = build(sys.argv[1])
+    entries = add_feature_options(build(sys.argv[1]))
     ids = [e["id"] for e in entries]
     assert len(ids) == len(set(ids)), "two SRD entries hashed to the same id"
     OUT.parent.mkdir(parents=True, exist_ok=True)
